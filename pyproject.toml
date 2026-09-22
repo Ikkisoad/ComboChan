@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "combochan"
+version = "0.1.0"
+description = "Frame-exact Vampire Savior combo experiments with optional Laya guidance"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+laya = ["laya==0.3.2"]
+
+[project.scripts]
+combochan = "combochan.cli:main"
+
+[tool.setuptools]
+packages = ["combochan"]
+
