@@ -66,14 +66,18 @@ def search_combos(bridge, budget=160, depth=4, beam=4, policy="heuristic", seed=
             candidates = candidates[:min(remaining,allowance)]
             if not candidates: break
             trials = [Trial(f"d{level}_{i}", c["steps"]) for i,c in enumerate(candidates)]
-            records, manifest = bridge.run(trials)
-            manifests.append(manifest)
+            records, record_jobs = [], []
+            for offset in range(0, len(trials), 512):
+                batch_records, manifest = bridge.run(trials[offset:offset+512])
+                manifests.append(manifest)
+                records.extend(batch_records)
+                record_jobs.extend([manifest["job"]] * len(batch_records))
             survivors = []
-            for c,t,r in zip(candidates,trials,records):
+            for c,t,r,job_id in zip(candidates,trials,records,record_jobs):
                 score = evaluate(r)
                 item = {**c, **score, "decision_state":r["trace"][sum(s.frames for s in c["steps"])]}
                 evaluated.append(item)
-                db.execute("INSERT INTO trials VALUES (?,?,?,?)", (manifest["job"],t.id,
+                db.execute("INSERT INTO trials VALUES (?,?,?,?)", (job_id,t.id,
                            json.dumps(asdict(t)),json.dumps(score)))
                 if score["candidate_valid"] and score["damage"] > c["parent_damage"]:
                     survivors.append(item)
@@ -93,7 +97,9 @@ def search_combos(bridge, budget=160, depth=4, beam=4, policy="heuristic", seed=
             manifests.append(manifest)
             scores = [evaluate(r) for r in records]
             signature = best["damage_events"]
-            passes = all(s["candidate_valid"] and s["damage_events"]==signature for s in scores)
+            repeats = repeatability(records)
+            passes = (all(s["candidate_valid"] and s["damage_events"]==signature for s in scores)
+                      and all(group["identical"] for group in repeats.values()))
             validation = {"passes":passes,"method":"guard/jump after first damage plus hitstun telemetry",
                           "repeatability":repeatability(records),"results":scores}
             export = {"snapshot_sha256":snapshot_hash, "rom":"vsavj", "steps":[asdict(s) for s in best["steps"]],

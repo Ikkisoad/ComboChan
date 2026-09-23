@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "combochan"
-version = "0.1.0"
+version = "0.2.0"
 description = "Frame-exact Vampire Savior combo experiments with optional Laya guidance"
 requires-python = ">=3.10"
 dependencies = []
@@ -14,7 +14,11 @@ laya = ["laya==0.3.2"]
 
 [project.scripts]
 combochan = "combochan.cli:main"
+combochan-dashboard = "combochan.dashboard:main"
 
 [tool.setuptools]
 packages = ["combochan"]
 
+
+[tool.setuptools.package-data]
+combochan = ["web/*.html", "web/*.css", "web/*.js"]

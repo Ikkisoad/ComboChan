@@ -2,7 +2,7 @@
 -- No gameplay memory writes, health refill, or meter refill.
 local source = debug.getinfo(1, "S").source:sub(2):gsub("\\", "/")
 local root = assert(source:match("^(.*)/bridge/runner.lua$"), "Use absolute script path")
-local dir = root .. "/artifacts/bridge/"
+local dir = COMBOCHAN_BRIDGE_DIR or (root .. "/artifacts/bridge/")
 local rb, rw, rs = memory.readbyte, memory.readword, memory.readwordsigned
 assert(emu.romname() == "vsavj", "This adapter supports vsavj only")
 
@@ -33,7 +33,7 @@ end
 
 local names = {"Up", "Down", "Left", "Right", "Weak Punch", "Medium Punch",
     "Strong Punch", "Weak Kick", "Medium Kick", "Strong Kick"}
-local codes = {U="Up",D="Down",L="Left",R="Right",LP="Weak Punch",MP="Medium Punch",
+local codes = {F="Forward",B="Back",U="Up",D="Down",L="Left",R="Right",LP="Weak Punch",MP="Medium Punch",
     HP="Strong Punch",LK="Weak Kick",MK="Medium Kick",HK="Strong Kick"}
 local input_names = joypad.get()
 for p=1,2 do
@@ -47,7 +47,15 @@ local function controls(buttons, defense, hit_seen)
     for name, value in pairs(input_names) do
         if type(value) == "boolean" then t[name] = false end
     end
-    for _, name in ipairs(buttons) do t["P1 " .. assert(codes[name])] = true end
+    for _, name in ipairs(buttons) do
+        local key = assert(codes[name])
+        if name == "F" or name == "B" then
+            local right = rs(0xFF8410) <= rs(0xFF8810)
+            if name == "B" then right = not right end
+            key = right and "Right" or "Left"
+        end
+        t["P1 " .. key] = true
+    end
     if defense ~= "neutral" and hit_seen then
         -- Hold away based on live positions; down-back also checks low gaps.
         local away = rs(0xFF8810) >= rs(0xFF8410) and "Right" or "Left"
@@ -60,7 +68,8 @@ end
 local function player(base)
     return {health=rw(base+0x50), recoverable=rw(base+0x52),
         stocks=rb(base+0x109), meter=rw(base+0x10A), facing=rb(base+0x120),
-        stun1=rb(base+0x144), stun2=rb(base+0x145),
+        -- +0x144 counts hits received; nonzero alone does not prove continuity.
+        combo_hits=rb(base+0x144), stun1=rb(base+0x144), stun2=rb(base+0x145),
         x=rs(base+0x10), y=rs(base+0x14), state=rw(base+4)}
 end
 local function sample(frame)
@@ -91,7 +100,7 @@ local function read_job()
     for i=2,#lines do
         local r=lines[i]
         assert(#r==5 and r[1]:match("^[%w_-]+$"), "Bad trial")
-        local trial={id=r[1], repeats=integer(r[2],1,100), tail=integer(r[3],1,240), defense=r[4], steps={}}
+        local trial={id=r[1], repeats=integer(r[2],1,100), tail=integer(r[3],1,600), defense=r[4], steps={}}
         assert(trial.defense=="neutral" or trial.defense=="stand" or trial.defense=="crouch" or trial.defense=="jump", "Bad defense")
         local total=trial.tail
         for step in r[5]:gmatch("[^;]+") do
@@ -112,9 +121,20 @@ local function read_job()
 end
 
 emu.registerexit(function() emu.speedmode("normal") end)
-write_atomic(dir.."ready.json",{protocol=1,rom=emu.romname(),inputs=input_names,script=source})
+local script_file = assert(io.open(source,"rb"))
+local script_content = script_file:read("*a"); script_file:close()
+write_atomic(dir.."ready.json",{protocol=1,rom=emu.romname(),inputs=input_names,script=source,script_content=script_content})
+local last_heartbeat = 0
+local function heartbeat()
+    local now = os.time()
+    if now ~= last_heartbeat then
+        write_atomic(dir.."heartbeat.json",{time=now,rom=emu.romname()})
+        last_heartbeat = now
+    end
+end
 print("ComboChan ready. Requests: " .. dir)
 while true do
+    heartbeat()
     local ok, job = pcall(read_job)
     if not ok then
         write_atomic(dir.."error.json",{error=tostring(job)}); error(job)
@@ -126,9 +146,12 @@ while true do
         for _, trial in ipairs(job.trials) do
             for repetition=1,trial.repeats do
                 savestate.load(job.snapshot)
+                assert(emu.romname() == "vsavj", "The selected save state is not vsavj")
                 local trace={sample(0)}
                 local baseline=trace[1].p2.health
-                local frame,hit_seen=0,false
+                local frame = 0
+                -- Existing combos must face escape attempts from the first restored frame.
+                local hit_seen = trace[1].p2.stun1 ~= 0 or trace[1].p2.stun2 ~= 0
                 local steps={}
                 for _,s in ipairs(trial.steps) do steps[#steps+1]=s end
                 steps[#steps+1]={frames=trial.tail,buttons={}}
@@ -136,6 +159,7 @@ while true do
                     for _=1,step.frames do
                         joypad.set(controls(step.buttons,trial.defense,hit_seen))
                         emu.frameadvance()
+                        heartbeat()
                         frame=frame+1
                         local observation=sample(frame)
                         trace[#trace+1]=observation

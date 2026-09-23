@@ -2,7 +2,21 @@
 
 An experimental combo-search bot for **Vampire Savior Japan (`vsavj`) in Fightcade FBNeo**. A Lua runner restores a fixed save state and executes exact frame inputs; Python searches continuations and optionally uses local Laya inference to prioritize them. The emulator measures every result.
 
-This first version searches standing/crouching normal attacks for P1 against P2. Results mean **best found in the configured search**, not globally optimal combos. Specials, air routes, meter-spending routes, and other games are not yet implemented.
+The dashboard searches normals, motion inputs, and movement templates for P1 against P2. It uses the resources available in the save state by default, with an optional stock-spending cap. Results mean **best found in the configured search**, not globally optimal combos. Character-specific move coverage and other games remain future work. The original CLI search retains its narrower meterless normal-attack scope.
+
+## Dashboard (recommended)
+
+Double-click **Start Dashboard.cmd**, or run:
+
+```powershell
+.\.venv\Scripts\python.exe -m combochan.dashboard --open
+```
+
+Open http://127.0.0.1:8790. In the Vampire Savior tab, select your FBNeo executable and `.fs` save state, click **Prepare session**, then **Launch emulator**. For an already-open emulator, expand the connection instructions and load the generated session Lua script. Stop the old training script before changing its path, disable Auto pause, and leave the game unpaused.
+
+The dashboard copies the snapshot into an isolated session. It provides search rules, heuristic/random/Laya policies, progress, cooperative stop, history, exact-input exports, and replay. A fresh runner heartbeat is required before a job can start. Every search first checks 100 repeated neutral traces. True-combo results also receive defensive replay checks.
+
+See [dashboard setup and game adapter guide](docs/DASHBOARD.md).
 
 ## Setup
 
@@ -73,7 +87,7 @@ Laya ranks small candidate groups, retaining exploration. It does not predict au
 - `artifacts/experiments.sqlite3`: requests and evaluated outcomes.
 - `artifacts/bridge/*.jsonl`: complete frame traces; corresponding manifests preserve exact requests.
 
-Damage is the sum of measured decreases in P2's health field, with the second health pool reported separately. The evaluator rejects health increases, observed recovery gaps, unresolved final hitstun, KO/life transitions, and meter-stock spending. This is a conservative game-specific heuristic, not a complete engine-level proof.
+Damage is the sum of measured decreases in P2's health field, with the second health pool reported separately. The evaluator rejects health increases, observed recovery gaps, unresolved final hitstun, KO/life transitions, and, in the original CLI, meter-stock spending. The dashboard applies the selected resource and combo rules. This is a conservative game-specific heuristic, not a complete engine-level proof.
 
 Before a result is marked verified, it must reproduce the same damage-event frames against neutral, standing guard, crouching guard, and jump attempts. Defensive inputs begin immediately after the first damage event. These checks cover the first normal-attack scope; they do not exhaust every possible defensive mechanic. A damage event is not necessarily identical to the game's displayed hit counter.
 

@@ -29,6 +29,27 @@ class EvaluatorTests(unittest.TestCase):
         result=evaluate(recording((4,20),range(12,19)))
         self.assertIn('recovery_gap',result['rejection_reasons'])
 
+    def test_initial_hitstun_continues_into_first_new_hit(self):
+        record=recording((4,12))
+        for row in record['trace'][:4]:row['p2']['stun1']=1
+        score=evaluate(record)
+        self.assertTrue(score['candidate_valid'])
+        self.assertTrue(score['starting_hitstun'])
+        self.assertEqual(score['damage'],20)
+
+    def test_recovery_before_first_new_hit_rejected(self):
+        record=recording((12,))
+        for row in record['trace'][:4]:row['p2']['stun2']=1
+        score=evaluate(record)
+        self.assertEqual(score['gaps'],[12])
+        self.assertIn('recovery_gap',score['rejection_reasons'])
+        self.assertTrue(evaluate(record,require_combo=False)['candidate_valid'])
+
+    def test_initial_hitstun_without_new_damage_is_not_a_result(self):
+        record=recording()
+        for row in record['trace'][:4]:row['p2']['stun1']=1
+        self.assertIn('no_damage',evaluate(record)['rejection_reasons'])
+
     def test_refill_not_mistaken_for_damage(self):
         result=evaluate(recording((4,),healing_frame=30))
         self.assertEqual(result['damage'],10)

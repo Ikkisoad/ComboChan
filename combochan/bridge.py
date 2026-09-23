@@ -9,7 +9,7 @@ import os
 import time
 import uuid
 
-BUTTONS = frozenset("U D L R LP MP HP LK MK HK".split())
+BUTTONS = frozenset("U D L R F B LP MP HP LK MK HK".split())
 
 
 @dataclass(frozen=True)
@@ -22,7 +22,7 @@ class Step:
             raise ValueError("Step duration must be 1–240 frames")
         if not set(self.buttons) <= BUTTONS or len(set(self.buttons)) != len(self.buttons):
             raise ValueError("Unknown or duplicate buttons")
-        if {"L", "R"} <= set(self.buttons) or {"U", "D"} <= set(self.buttons):
+        if {"L", "R"} <= set(self.buttons) or {"U", "D"} <= set(self.buttons) or {"F", "B"} <= set(self.buttons):
             raise ValueError("Opposing directions")
 
 
@@ -39,8 +39,8 @@ class Trial:
             raise ValueError("Invalid trial ID")
         if type(self.repeats) is not int or not 1 <= self.repeats <= 100:
             raise ValueError("Repeats must be 1–100")
-        if type(self.tail) is not int or not 1 <= self.tail <= 240:
-            raise ValueError("Tail must be 1–240 frames")
+        if type(self.tail) is not int or not 1 <= self.tail <= 600:
+            raise ValueError("Tail must be 1–600 frames")
         if not self.steps or self.tail + sum(s.frames for s in self.steps) > 1200:
             raise ValueError("Trial must have inputs and at most 1200 frames")
         if self.defense not in ("neutral", "stand", "crouch", "jump"):
@@ -48,7 +48,8 @@ class Trial:
 
 
 class Bridge:
-    def __init__(self, directory: Path, timeout: float = 180):
+    def __init__(self, directory: Path, timeout: float = 180, rom: str = "vsavj"):
+        self.rom = rom
         self.directory = directory.resolve()
         self.timeout = timeout
 
@@ -63,7 +64,7 @@ class Bridge:
         if not ready_path.exists():
             raise RuntimeError("Load bridge/runner.lua in FBNeo first")
         ready = json.loads(ready_path.read_text())
-        if ready.get("protocol") != 1 or ready.get("rom") != "vsavj":
+        if ready.get("protocol") != 1 or ready.get("rom") != self.rom:
             raise RuntimeError("Wrong bridge protocol or ROM")
         snapshot = self.directory / "root.fs"
         snapshot_hash = hashlib.sha256(snapshot.read_bytes()).hexdigest()
@@ -106,7 +107,7 @@ class Bridge:
             if any(len(r["trace"]) != lengths[r["id"]] for r in records):
                 raise RuntimeError("Emulator did not execute the requested frame count")
             manifest = {"job": job, "snapshot_sha256": snapshot_hash, "rom": ready['rom'],
-                        "adapter_sha256": hashlib.sha256(Path(ready['script']).read_bytes()).hexdigest(),
+                        "adapter_sha256": hashlib.sha256(ready["script_content"].encode("utf-8") if "script_content" in ready else Path(ready["script"]).read_bytes()).hexdigest(),
                         "speed": speed, "wall_seconds": time.monotonic() - started,
                         "trials": [asdict(t) for t in trials], "raw_results": str(result)}
             (self.directory / f"{job}.manifest.json").write_text(json.dumps(manifest, indent=2))

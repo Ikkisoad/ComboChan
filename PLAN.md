@@ -1,6 +1,6 @@
 # ComboChan — initial project plan
 
-Status: first target selected: Vampire Savior (970519 Japan, `vsavj`) in Fightcade FBNeo v0.2.97.44-55 on Windows. Optimization preferences remain provisional.
+Status: first implementation running and live-validated; Laya search comparison interrupted and pending resumption. First target: Vampire Savior (970519 Japan, `vsavj`) in Fightcade FBNeo v0.2.97.44-55 on Windows. Optimization preferences remain provisional.
 
 ## First target: inspected local setup
 
@@ -111,3 +111,15 @@ Laya exposes typed decisions over text/JSON, including choice, ordinal score, an
 - Model card: https://huggingface.co/convaiinnovations/laya
 
 Research checked 2026-09-22. Backend-specific feasibility remains unverified until the target game is selected.
+
+
+## Implementation checkpoint (2026-09-23)
+
+- Implemented standalone FBNeo Lua runner, Python file bridge, telemetry evaluator, bounded normal-attack search, replay export, SQLite records, and local Laya policy.
+- Preserved original slot file; the working copy has the same SHA-256.
+- Live light-punch validation: 100 identical recorded frame traces.
+- Positive/negative controls passed: connected MP to HK survives guard/jump attempts; a delayed follow-up is rejected as a gap and escaped by the dummy.
+- Laya 0.3.2 loaded pinned model revision 1c5edc17a7acd8701df6fc341c0d179f1c62c982 and completed local CPU inference.
+- Initial benchmark: heuristic search found 19 damage and random search 20 damage, both verified; Laya search was interrupted before a final report.
+- User disabled training-mode health refill. Standalone runner replaces the training script and performs no refill writes.
+- Remaining: complete Laya comparison, improve search coverage/timing refinement, and later add specials, air routes, resource objectives, and optional domain fine-tuning. Current release does not implement the entire longer-term roadmap.

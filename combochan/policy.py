@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import random
 import time
+import threading
 
 
 class Policy:
@@ -26,6 +27,40 @@ class Policy:
             self.model_info.update(package=laya.__version__, device=str(self.agent.device),
                                    load_seconds=time.monotonic()-started)
 
+    def guided_batch(self, candidates, context, size=16, progress=None, check_cancel=None):
+        """One inference on at most 12 choices, then return actual trials immediately."""
+        if check_cancel: check_cancel()
+        window=candidates[:64]
+        count=min(12,len(window))
+        if count<2: return list(candidates[:size])
+        indexes=[i*(len(window)-1)//(count-1) for i in range(count)]
+        group=[window[i] for i in indexes]
+        options={str(i):c.get('notation',c['label']) for i,c in enumerate(group)}
+        question={'next':{'type':'choice','instructions':
+            'Choose the continuation most likely to extend the combo under the supplied game and resource rules. Consider timing, landing, and available resources.',
+            'criteria':options}}
+        started=time.monotonic();done=threading.Event()
+        def report():
+            if progress: progress(len(group),time.monotonic()-started,len(self.calls))
+        def heartbeat():
+            while not done.wait(2): report()
+        report()
+        thread=threading.Thread(target=heartbeat,daemon=True);thread.start()
+        try: response=self.agent.predict(context,question)
+        finally: done.set();thread.join()
+        probabilities=response['answers']['next']['probabilities']
+        self.calls.append({'seconds':time.monotonic()-started,'context':context,'options':options,'response':response})
+        if check_cancel: check_cancel()
+        ranked=sorted(enumerate(group),key=lambda pair:-probabilities[str(pair[0])])
+        selected=[c for _,c in ranked[:min(8,size)]]
+        selected_ids={id(c) for c in selected}
+        # Keep baseline exploration; defer the remaining options without losing them.
+        for candidate in candidates:
+            if len(selected)>=size: break
+            if id(candidate) not in selected_ids:
+                selected.append(candidate);selected_ids.add(id(candidate))
+        return selected
+
     def order(self, candidates, context):
         candidates = list(candidates)
         if self.mode == "random":
@@ -42,8 +77,8 @@ class Policy:
                     continue
                 options = {str(i): c["label"] for i, c in enumerate(group)}
                 question = {"next": {"type": "choice", "instructions":
-                    "Which next experiment is most likely to extend a true meterless combo in Vampire Savior? "
-                    "Choose a continuation; short delays may cancel, long delays may drop the combo.",
+                    "Which next experiment is most likely to extend a combo under the supplied game and resource rules? "
+                    "Consider the current position, available resources, and air-to-ground transitions. Delays may allow landing or recovery; excessive delays may drop the combo.",
                     "criteria": options}}
                 start = time.monotonic()
                 response = self.agent.predict(context, question)
