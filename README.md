@@ -2,7 +2,26 @@
 
 An experimental combo-search bot for **Vampire Savior Japan (`vsavj`) in Fightcade FBNeo**. A Lua runner restores a fixed save state and executes exact frame inputs; Python searches continuations and optionally uses local Laya inference to prioritize them. The emulator measures every result.
 
-The dashboard searches normals, motion inputs, and movement templates for P1 against P2. It uses the resources available in the save state by default, with an optional stock-spending cap. Results mean **best found in the configured search**, not globally optimal combos. Character-specific move coverage and other games remain future work. The original CLI search retains its narrower meterless normal-attack scope.
+The dashboard searches normals, motion inputs, and movement templates for P1 against P2. It uses the resources available in the save state by default, with an optional stock-spending cap. Results mean **best found in the configured search**, not globally optimal combos. Character-specific move coverage remains incomplete. Other compatible FBNeo games can use manually configured JSON profiles. The original CLI search retains its narrower meterless normal-attack scope.
+
+## Offline architecture smoke test
+
+Run the smallest restore → execute → score slice without FBNeo or third-party dependencies:
+
+```powershell
+python -m combochan.smoke
+python -m unittest discover -s tests -p test_smoke.py
+```
+
+The deterministic toy adapter produces a connected 25-damage sequence, a rejected recovery gap, and a rejected whiff. These are synthetic results, not verified game combos. After installing Laya and downloading the model as described below, run `python -m combochan.smoke --policy laya` to use real local inference to order the same trials. Scoring always uses the resulting telemetry, never model probabilities.
+
+`combochan/core.py` defines `SaveStates`, `GameControl`, `ComboExecutor`, and `ResultScorer` protocols. `FrameExecutor` restores each repetition, executes bounded frame inputs plus a neutral tail, checks trace continuity, and releases controls even on failure. `TelemetryScorer` reuses the existing evaluator. `combochan/stub.py` implements full in-memory snapshots including held inputs and toy counters. New synchronous adapters can implement this boundary; the existing FBNeo batch bridge remains a separate backend. Real adapters must supply the evaluator's telemetry schema and validate game-specific control and combo signals before scored automation.
+
+## Configure another game
+
+Open the dashboard and click **Add game** in the sidebar. The five-step wizard guides you through game details, controls, memory values, move sequences, and review. It validates missing values, saves unfinished drafts in your browser, and adds the completed game immediately. Saved games reload automatically on startup; use **Edit game setup** to change their mappings later.
+
+See the [manual game setup guide](docs/GENERIC_GAMES.md) for field meanings and calibration. The backend supports compatible two-player FBNeo games; users must supply their game's memory addresses and input names. JSON profiles and `--game-profile` remain available for advanced setup.
 
 ## Dashboard (recommended)
 

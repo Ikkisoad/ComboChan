@@ -4,7 +4,33 @@ local source = debug.getinfo(1, "S").source:sub(2):gsub("\\", "/")
 local root = assert(source:match("^(.*)/bridge/runner.lua$"), "Use absolute script path")
 local dir = COMBOCHAN_BRIDGE_DIR or (root .. "/artifacts/bridge/")
 local rb, rw, rs = memory.readbyte, memory.readword, memory.readwordsigned
-assert(emu.romname() == "vsavj", "This adapter supports vsavj only")
+local config = COMBOCHAN_GAME
+local expected_rom = config and config.rom or "vsavj"
+assert(emu.romname() == expected_rom, "Wrong ROM for selected game profile")
+local function read_field(spec)
+    local readers = {u8=rb, u16=rw, s16=rs}
+    local value = readers[spec.type](spec.address)
+    if spec.mask then
+        local result, place, mask = 0, 1, spec.mask
+        while mask > 0 do
+            if mask % 2 == 1 and value % 2 == 1 then result = result + place end
+            value = math.floor(value / 2); mask = math.floor(mask / 2); place = place * 2
+        end
+        value = result
+    end
+    if spec.equals ~= nil then value = value == spec.equals and 1 or 0 end
+    return value
+end
+local function position(player)
+    if config then return read_field(config.players[player].x) end
+    return rs(player == "p1" and 0xFF8410 or 0xFF8810)
+end
+local function input_key(player, code)
+    if config then return assert(config.inputs[code], "Unmapped input: "..code)[player] end
+    local default = {U="Up",D="Down",L="Left",R="Right",LP="Weak Punch",MP="Medium Punch",
+        HP="Strong Punch",LK="Weak Kick",MK="Medium Kick",HK="Strong Kick"}
+    return (player == "p1" and "P1 " or "P2 ") .. assert(default[code])
+end
 
 local function encode(v)
     if type(v) == "string" then
@@ -36,9 +62,19 @@ local names = {"Up", "Down", "Left", "Right", "Weak Punch", "Medium Punch",
 local codes = {F="Forward",B="Back",U="Up",D="Down",L="Left",R="Right",LP="Weak Punch",MP="Medium Punch",
     HP="Strong Punch",LK="Weak Kick",MK="Medium Kick",HK="Strong Kick"}
 local input_names = joypad.get()
-for p=1,2 do
-    for _, name in ipairs(names) do
-        assert(input_names["P"..p.." "..name] ~= nil, "Missing input: P"..p.." "..name)
+if config then
+    codes = {F=true,B=true}
+    for code, mapping in pairs(config.inputs) do
+        codes[code] = true
+        for _, key in pairs(mapping) do
+            assert(type(input_names[key]) == "boolean", "Missing input: "..key)
+        end
+    end
+else
+    for p=1,2 do
+        for _, name in ipairs(names) do
+            assert(input_names["P"..p.." "..name] ~= nil, "Missing input: P"..p.." "..name)
+        end
     end
 end
 local function controls(buttons, defense, hit_seen)
@@ -48,20 +84,20 @@ local function controls(buttons, defense, hit_seen)
         if type(value) == "boolean" then t[name] = false end
     end
     for _, name in ipairs(buttons) do
-        local key = assert(codes[name])
+        assert(codes[name], "Unknown button")
+        local code = name
         if name == "F" or name == "B" then
-            local right = rs(0xFF8410) <= rs(0xFF8810)
+            local right = position("p1") <= position("p2")
             if name == "B" then right = not right end
-            key = right and "Right" or "Left"
+            code = right and "R" or "L"
         end
-        t["P1 " .. key] = true
+        t[input_key("p1", code)] = true
     end
     if defense ~= "neutral" and hit_seen then
-        -- Hold away based on live positions; down-back also checks low gaps.
-        local away = rs(0xFF8810) >= rs(0xFF8410) and "Right" or "Left"
-        t["P2 "..away] = true
-        if defense == "crouch" then t["P2 Down"] = true end
-        if defense == "jump" then t["P2 Up"] = true end
+        local away = position("p2") >= position("p1") and "R" or "L"
+        t[input_key("p2", away)] = true
+        if defense == "crouch" then t[input_key("p2", "D")] = true end
+        if defense == "jump" then t[input_key("p2", "U")] = true end
     end
     return t
 end
@@ -72,7 +108,13 @@ local function player(base)
         combo_hits=rb(base+0x144), stun1=rb(base+0x144), stun2=rb(base+0x145),
         x=rs(base+0x10), y=rs(base+0x14), state=rw(base+4)}
 end
+local function configured_player(id)
+    local values = {recoverable=0,stocks=0,meter=0,facing=0,stun2=0,y=0,state=0}
+    for name, spec in pairs(config.players[id]) do values[name] = read_field(spec) end
+    return values
+end
 local function sample(frame)
+    if config then return {frame=frame,p1=configured_player("p1"),p2=configured_player("p2")} end
     return {frame=frame,p1=player(0xFF8400),p2=player(0xFF8800)}
 end
 local function split(line)
@@ -123,7 +165,7 @@ end
 emu.registerexit(function() emu.speedmode("normal") end)
 local script_file = assert(io.open(source,"rb"))
 local script_content = script_file:read("*a"); script_file:close()
-write_atomic(dir.."ready.json",{protocol=1,rom=emu.romname(),inputs=input_names,script=source,script_content=script_content})
+write_atomic(dir.."ready.json",{protocol=1,rom=emu.romname(),inputs=input_names,script=source,script_content=script_content,profile_sha256=config and config.sha256 or nil})
 local last_heartbeat = 0
 local function heartbeat()
     local now = os.time()
@@ -146,7 +188,7 @@ while true do
         for _, trial in ipairs(job.trials) do
             for repetition=1,trial.repeats do
                 savestate.load(job.snapshot)
-                assert(emu.romname() == "vsavj", "The selected save state is not vsavj")
+                assert(emu.romname() == expected_rom, "The selected save state has the wrong ROM")
                 local trace={sample(0)}
                 local baseline=trace[1].p2.health
                 local frame = 0

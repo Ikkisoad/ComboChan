@@ -48,7 +48,10 @@ class Trial:
 
 
 class Bridge:
-    def __init__(self, directory: Path, timeout: float = 180, rom: str = "vsavj"):
+    def __init__(self, directory: Path, timeout: float = 180, rom: str = "vsavj", snapshot: str = "root.fs"):
+        if not snapshot.endswith(".fs") or not snapshot[:-3] or any(not (c.isascii() and (c.isalnum() or c in "_-")) for c in snapshot[:-3]):
+            raise ValueError("Invalid snapshot filename")
+        self.snapshot = snapshot
         self.rom = rom
         self.directory = directory.resolve()
         self.timeout = timeout
@@ -66,10 +69,10 @@ class Bridge:
         ready = json.loads(ready_path.read_text())
         if ready.get("protocol") != 1 or ready.get("rom") != self.rom:
             raise RuntimeError("Wrong bridge protocol or ROM")
-        snapshot = self.directory / "root.fs"
+        snapshot = self.directory / self.snapshot
         snapshot_hash = hashlib.sha256(snapshot.read_bytes()).hexdigest()
         job = uuid.uuid4().hex
-        lines = [f"COMBOCHAN1\t{job}\troot.fs\t{speed}"]
+        lines = [f"COMBOCHAN1\t{job}\t{self.snapshot}\t{speed}"]
         for t in trials:
             steps = ";".join(f"{s.frames}:{','.join(s.buttons)}" for s in t.steps)
             lines.append(f"{t.id}\t{t.repeats}\t{t.tail}\t{t.defense}\t{steps}")
@@ -107,6 +110,7 @@ class Bridge:
             if any(len(r["trace"]) != lengths[r["id"]] for r in records):
                 raise RuntimeError("Emulator did not execute the requested frame count")
             manifest = {"job": job, "snapshot_sha256": snapshot_hash, "rom": ready['rom'],
+                        "profile_sha256": ready.get("profile_sha256"),
                         "adapter_sha256": hashlib.sha256(ready["script_content"].encode("utf-8") if "script_content" in ready else Path(ready["script"]).read_bytes()).hexdigest(),
                         "speed": speed, "wall_seconds": time.monotonic() - started,
                         "trials": [asdict(t) for t in trials], "raw_results": str(result)}

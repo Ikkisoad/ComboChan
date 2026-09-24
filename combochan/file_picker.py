@@ -9,9 +9,12 @@ def main():
     root=tk.Tk(); root.withdraw(); root.attributes('-topmost',True)
     kind=sys.argv[1]
     types=[('FBNeo executable','*.exe')] if kind=='emulator' else [('FBNeo save state','*.fs')]
-    path=filedialog.askopenfilename(title='Select '+kind,filetypes=types,parent=root)
+    if kind=='snapshots':
+        result={'paths':list(filedialog.askopenfilenames(title='Add save states to queue',filetypes=types,parent=root))}
+    else:
+        result={'path':filedialog.askopenfilename(title='Select '+kind,filetypes=types,parent=root)}
     root.destroy()
-    print(json.dumps({'path':path}))
+    print(json.dumps(result))
 
 
 if __name__=='__main__': main()

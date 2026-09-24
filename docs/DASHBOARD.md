@@ -24,6 +24,10 @@ Native Browse uses Python tkinter; paste full paths if tkinter is unavailable. T
 
 ## Adding another game
 
+For a compatible FBNeo game, click **Add game** in the sidebar. The [five-step setup wizard](GENERIC_GAMES.md) covers game details, controls, memory values, moves and review. Drafts survive closing or refreshing; saved games appear immediately and reload on startup. Use **Edit game setup** to revise a custom game. The new tab uses independent settings and sessions. JSON profiles remain an alternative; no source edits are needed.
+
+For games requiring different backend or scoring behavior:
+
 `combochan/games.py` is the registry. Each adapter supplies a stable id, title/badge, ROM identifier, emulator metadata, state extensions, runner path, public input groups, launch arguments, action templates, initial telemetry validation, and scoring. Register its instance in `GAMES`; the frontend creates its tab and persists a separate profile automatically.
 
 The current worker and file bridge share the existing frame-step and two-player telemetry protocol. A new emulator needs a compatible bridge or a corresponding worker/backend extension, not just a new title. Implement the game's memory offsets, snapshot loading, health/resource semantics and defensive validation in its runner/scorer. Validate against known positive/negative controls and live deterministic replays before claiming support. The current native file picker and setup copy are FBNeo-oriented and should be generalized with the next backend.
@@ -67,3 +71,9 @@ The supplied Lilith route was experimentally validated on its prepared snapshot:
 ## Saved results and favorites
 
 Use **Favorite** on a result to keep it in the **Favorites** tab under Saved results. Favorites persist across restarts and retain replay/export. **Clear results** clears non-favorites from the selected game's list and preserves favorites and other games. **Undo clear** restores the last cleared group during the current page session. Clearing updates `artifacts/dashboard/result-library.json`; exported results and raw experiment evidence remain on disk, so clearing the list does not reclaim disk space.
+
+## Save-state queue
+
+Use **Add states** to select multiple `.fs` files, or paste one full path per line into the save-state queue. Lines run from top to bottom; edit them to reorder or remove entries (up to 100 states). Prepare the session and connect its runner once. Search and restoration checks process every prepared state sequentially with the same rules and a full budget per state. Changing the queue requires preparing and connecting a new session.
+
+Progress shows the current state and queue position. Each search saves a separate result labeled with its source state; replay works for any state in the prepared queue. Stop finishes the active emulator batch and cancels remaining work. Errors halt the queue; already completed results remain available. Original save-state files are never modified.

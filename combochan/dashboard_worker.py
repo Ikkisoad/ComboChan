@@ -31,9 +31,9 @@ def timing_options(parent, rules):
     return list(dict.fromkeys([d for d in anchors+[0,1,2,4,8,12,16,24,32,48,60]+explicit+list(range(limit+1)) if d<=limit]))
 
 
-def continuation_candidates(parent,actions,rules):
+def continuation_candidates(parent,actions,rules,vsav_ordering=True):
     actions=list(actions)
-    if parent['steps']:
+    if parent['steps'] and vsav_ordering:
         previous=parent.get('last','')
         buttons=['LP','LK','MP','MK','HP','HK']
         old=previous.removeprefix('c.')
@@ -71,7 +71,7 @@ def continuation_candidates(parent,actions,rules):
             candidates.append({'steps':steps,'notation':notation,'label':f'{delay}f {action.name}',
                                'group':action.group,'last':action.name,'delay':delay,'parent_damage':parent['score']['damage'] if 'score' in parent else 0,
                                '_timing_round':round_index,'_action_order':index})
-    if parent['steps'] and rules.get('auto_timing',True):
+    if parent['steps'] and vsav_ordering and rules.get('auto_timing',True):
         # Spend the first windows on plausible chain continuations, before motion spam.
         old=parent.get('last','').removeprefix('c.')
         strengths=['LP','LK','MP','MK','HP','HK']
@@ -100,11 +100,18 @@ def select_frontier(survivors, width):
 
 
 def execute(config, emit_event=emit):
-    game=get_game(config['game'])
+    if 'game_profile' in config:
+        from .game_profile import ConfiguredGame
+        game=ConfiguredGame(config['game_profile'])
+        if game.id!=config['game']: raise ValueError('Game profile ID mismatch.')
+    else:
+        game=get_game(config['game'])
     session=Path(config['session'])
-    bridge=Bridge(session/'bridge',timeout=120,rom=game.rom)
+    snapshot_file=config.get('snapshot_file','root.fs')
+    bridge=Bridge(session/'bridge',timeout=120,rom=game.rom,snapshot=snapshot_file)
     rules=config['rules']
-    snapshot_hash=hashlib.sha256((session/'bridge/root.fs').read_bytes()).hexdigest()
+    if hasattr(game,'validate_rules'): game.validate_rules(rules)
+    snapshot_hash=hashlib.sha256((session/'bridge'/snapshot_file).read_bytes()).hexdigest()
     started=time.monotonic()
     def check_cancel():
         if (session/'cancel.flag').exists(): raise Cancelled('Stopped after completing the active batch.')
@@ -115,8 +122,12 @@ def execute(config, emit_event=emit):
     current_script=Path(__file__).resolve().parents[1]/game.runner_path
     if ready.get('script_content') != current_script.read_bytes().decode('utf-8'):
         raise RuntimeError('The loaded Lua runner is outdated. Stop it and load the prepared session script again.')
+    profile_hash=getattr(game,'profile_sha256',None)
+    if profile_hash and ready.get('profile_sha256')!=profile_hash:
+        raise RuntimeError('The loaded game profile changed. Prepare and connect a new session.')
     if config['action']=='replay':
         replay=config['replay']
+        if replay.get('profile_sha256')!=profile_hash: raise ValueError('Replay requires the original game profile.')
         if replay['snapshot_sha256'] != snapshot_hash: raise ValueError('This result uses a different save state.')
         steps=tuple(Step(s['frames'],tuple(s['buttons'])) for s in replay['steps'])
         emit_event(stage='replaying',message='Playing the saved frame inputs at normal speed.')
@@ -134,7 +145,7 @@ def execute(config, emit_event=emit):
     game.validate_initial(initial)
     starting_hitstun=bool(initial['p2']['stun1'] or initial['p2']['stun2'])
     gate={'manifest':manifest,'repeatability':checks,'initial_state':initial}
-    (session/'verify.json').write_text(json.dumps(gate,indent=2),encoding='utf-8')
+    (session/(snapshot_file+'.verify.json' if snapshot_file!='root.fs' else 'verify.json')).write_text(json.dumps(gate,indent=2),encoding='utf-8')
     if config['action']=='check':
         emit_event(stage='complete',message='100/100 restoration traces matched.',result={'check':True,**gate})
         return
@@ -152,7 +163,7 @@ def execute(config, emit_event=emit):
         check_cancel()
         pools=[]
         for parent in frontier:
-            candidates=continuation_candidates(parent,actions,rules)
+            candidates=continuation_candidates(parent,actions,rules,getattr(game,"vsav_ordering",True))
             if candidates:
                 if rules['policy']=='laya':
                     pools.append(candidates)
@@ -241,11 +252,11 @@ def execute(config, emit_event=emit):
         passed=repeated and all(s['candidate_valid'] and s['damage_events']==candidate['score']['damage_events'] for s in scores)
         checked={'steps':[asdict(s) for s in candidate['steps']],'tail':candidate.get('tail',rules['tail']),'damage':candidate['score']['damage'],
                 'notation':candidate['notation'],'verified':bool(passed and rules['true_combo']),
-                'reproduced':passed,'snapshot_sha256':snapshot_hash,'validation':scores,'starting_hitstun':starting_hitstun}
+                'reproduced':passed,'profile_sha256':profile_hash,'snapshot_sha256':snapshot_hash,'validation':scores,'starting_hitstun':starting_hitstun}
         validation_attempts.append({'notation':checked['notation'],'damage':checked['damage'],'passed':passed})
         if export is None or passed: export=checked
         if passed: break
-    result={'game':game.id,'starting_hitstun':starting_hitstun,'rules':rules,'best':export,'evaluated':completed,'simulator_frames':simulator_frames,
+    result={'game':game.id,'game_profile':getattr(game,'definition',None),'profile_sha256':profile_hash,'starting_hitstun':starting_hitstun,'rules':rules,'best':export,'evaluated':completed,'simulator_frames':simulator_frames,
             'wall_seconds':time.monotonic()-started,'snapshot_sha256':snapshot_hash,'session':str(session),
             'validation_attempts':validation_attempts,'model':policy.model_info,'model_calls':policy.calls,'manifests':manifests,
             'scope':'Best found within the selected input templates and budget; no global optimality claim.'}
@@ -253,10 +264,29 @@ def execute(config, emit_event=emit):
                message=('Search finished.' if export['reproduced'] else 'No shortlisted route passed validation. The saved route is marked Failed validation.') if export else 'No valid damaging sequence found in this search.',result=result)
 
 
+def execute_queue(config, emit_event=emit):
+    snapshots=config.get('snapshots',[])
+    if config['action']=='replay' or not snapshots:
+        return execute(config,emit_event)
+    session=Path(config['session'])
+    for index,snapshot in enumerate(snapshots,1):
+        if (session/'cancel.flag').exists(): raise Cancelled('Queue stopped. Completed results were kept.')
+        emit_event(stage='starting',queue_index=index,queue_total=len(snapshots),snapshot_source=snapshot['source'],
+                   completed=0,damage=0,notation='',depth=0,message=f"Starting state {index} of {len(snapshots)}: {snapshot['source']}")
+        def forward(**event):
+            event.update(queue_index=index,queue_total=len(snapshots),snapshot_source=snapshot['source'])
+            if 'result' in event: event['result']['snapshot_source']=snapshot['source']
+            if event.get('stage')=='complete': event['stage']='searching' if config['action']=='search' else 'checking'
+            emit_event(**event)
+        execute({**config,'snapshot_file':snapshot['file']},forward)
+    if (session/'cancel.flag').exists(): raise Cancelled('Queue stopped. Completed results were kept.')
+    emit_event(stage='complete',message=f'Finished all {len(snapshots)} save states.')
+
+
 def main():
     config=json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
     try:
-        execute(config)
+        execute_queue(config)
     except Cancelled as exc:
         emit(stage='cancelled',message=str(exc))
     except Exception as exc:

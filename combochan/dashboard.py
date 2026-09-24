@@ -30,7 +30,7 @@ BUSY={'starting','checking','model','searching','validating','replaying','stoppi
 
 def validate_rules(data,game):
     if not isinstance(data,dict): raise ValueError('Rules must be an object.')
-    rules={**DEFAULT_RULES,**data}
+    rules={**DEFAULT_RULES,'groups':[g['id'] for g in game.groups],**data}
     bounds={'budget':(24,5000),'depth':(1,8),'beam':(1,32),'seed':(0,2147483647),
             'max_start_delay':(0,120),'max_delay':(0,120),'max_frames':(1,960),'tail':(10,600),'stock_cap':(0,99)}
     for key,(low,high) in bounds.items():
@@ -52,6 +52,7 @@ def validate_rules(data,game):
     if not isinstance(disabled,list) or any(not isinstance(n,str) or n not in names for n in disabled):
         raise ValueError('Unknown disabled move.')
     if not game.search_actions(rules): raise ValueError('Enable at least one built-in or custom move.')
+    if hasattr(game,'validate_rules'): game.validate_rules(rules)
     return {k:rules[k] for k in DEFAULT_RULES}
 
 
@@ -72,6 +73,14 @@ class Dashboard:
         self.root=Path(root)
         self.data=self.root/'artifacts/dashboard'
         self.config=read_json(self.data/'config.json',{}) or {}
+        from .game_profile import ConfiguredGame
+        profile_file=self.data/'game-profiles.json'
+        self.game_definitions=json.loads(profile_file.read_text(encoding='utf-8')) if profile_file.exists() else {}
+        if not isinstance(self.game_definitions,dict): raise ValueError('Invalid saved game profiles.')
+        for game_id,definition in self.game_definitions.items():
+            game=ConfiguredGame(definition)
+            if game.id!=game_id: raise ValueError('Saved game profile ID mismatch.')
+            GAMES[game.id]=game
         self.token=secrets.token_urlsafe(32)
         self.lock=threading.RLock()
         self.job={'stage':'idle','message':'Prepare a session to get started.','completed':0}
@@ -82,9 +91,40 @@ class Dashboard:
         game=get_game(game_id)
         default_exe=Path('G:/Games/Fightcade/emulator/fbneo/fcadefbneo.exe')
         default_state=Path('G:/Games/Fightcade/emulator/fbneo/savestates/vsavj slot 01.fs')
-        return { 'emulator':str(default_exe) if default_exe.exists() else '',
-                 'snapshot':str(default_state) if default_state.exists() else '',
-                 'rules':dict(DEFAULT_RULES),**self.config.get(game.id,{})}
+        value={ 'emulator':str(default_exe) if default_exe.exists() else '',
+                 'snapshot':str(default_state) if game.id=='vampire-savior' and default_state.exists() else '',
+                 'rules':{**DEFAULT_RULES,'groups':[g['id'] for g in game.groups],
+                          'true_combo':getattr(game,'definition',{}).get('combo_validated',True)},**self.config.get(game.id,{})}
+
+        if hasattr(game,'definition'):
+            rules={**value['rules']}
+            rules['groups']=[g for g in rules.get('groups',[]) if g=='configured'] or ['configured']
+            names={a.name for a in game.actions(['configured'])}
+            rules['disabled_actions']=[n for n in rules.get('disabled_actions',[]) if n in names]
+            if not game.definition['combo_validated']: rules['true_combo']=False
+            if 'stocks' not in game.definition['players']['p1']: rules['resources']='state'
+            value['rules']=rules
+        return value
+
+    def save_game_profile(self,data):
+        from .game_profile import ConfiguredGame
+        with self.lock:
+            self.idle()
+            game=ConfiguredGame(data.get('definition'))
+            original=data.get('original_id')
+            if original is None:
+                if game.id in GAMES: raise ValueError('This game ID already exists. Choose a unique ID or edit that game.')
+            else:
+                if original!=game.id: raise ValueError('An existing game ID cannot be changed.')
+                previous=get_game(original)
+                if not hasattr(previous,'definition'): raise ValueError('Built-in games cannot be edited with this wizard.')
+                if data.get('original_sha256')!=previous.profile_sha256:
+                    raise ValueError('This profile changed elsewhere. Close the wizard and reopen Edit game setup.')
+            definitions={**self.game_definitions,game.id:game.definition}
+            atomic_json(self.data/'game-profiles.json',definitions)
+            self.game_definitions=definitions
+            GAMES[game.id]=game
+            return {'game':game.id,'profile_sha256':game.profile_sha256}
 
     def idle(self):
         if self.job['stage'] in BUSY: raise ValueError('A job is active. Stop it or wait for it to finish first.')
@@ -94,6 +134,9 @@ class Dashboard:
         if not value: raise ValueError('Prepare a session first.')
         path=Path(value).resolve()
         if not path.is_relative_to((self.data/'sessions').resolve()): raise ValueError('Invalid session directory.')
+        expected=getattr(get_game(game_id),'profile_sha256',None)
+        if expected and read_json(path/'session.json',{}).get('profile_sha256')!=expected:
+            raise ValueError('Game profile changed. Prepare a new session.')
         return path
 
     def connection(self,game_id):
@@ -103,9 +146,12 @@ class Dashboard:
             ready=read_json(session/'bridge/ready.json',{}) or {}
             age=time.time()-heartbeat.get('time',0)
             connected=0<=age<6 and ready.get('rom')==get_game(game_id).rom
+            expected=getattr(get_game(game_id),'profile_sha256',None)
+            if expected: connected=connected and ready.get('profile_sha256')==expected
             return {'connected':connected,'prepared':True,'label':'Runner connected' if connected else 'Waiting for runner',
                     'script':str(session/'connect.lua'),'pending':(session/'bridge/request.tsv').exists(),
-                    'snapshot_sha256':read_json(session/'session.json',{}).get('snapshot_sha256')}
+                    'snapshot_sha256':read_json(session/'session.json',{}).get('snapshot_sha256'),
+                    'snapshot_hashes':[s['snapshot_sha256'] for s in read_json(session/'session.json',{}).get('snapshots',[])] or [read_json(session/'session.json',{}).get('snapshot_sha256')]}
         except ValueError:
             return {'connected':False,'prepared':False,'label':'No session prepared','script':'','pending':False}
 
@@ -129,7 +175,7 @@ class Dashboard:
             if not result.get('best'): continue
             best=result['best']
             items.append({'id':id,'favorite':bool(flags.get('favorite')),'game':result.get('game','vampire-savior'),'created':path.stat().st_mtime,
-                'damage':best.get('damage',0),'notation':best.get('notation',best.get('label','Saved route')),
+                'snapshot_source':result.get('snapshot_source',''),'damage':best.get('damage',0),'notation':best.get('notation',best.get('label','Saved route')),
                 'verified':best.get('verified',False),'failed_validation':best.get('reproduced') is False,'policy':result.get('rules',{}).get('policy',result.get('policy','heuristic')),
                 'evaluated':result.get('evaluated',0),'snapshot_sha256':best.get('snapshot_sha256',result.get('snapshot_sha256'))})
         return sorted(items,key=lambda r:r['created'],reverse=True)
@@ -168,6 +214,7 @@ class Dashboard:
     def status(self):
         with self.lock:
             return {'games':[g.public() for g in GAMES.values()],
+                    'game_definitions':{g.id:{'definition':g.definition,'sha256':g.profile_sha256} for g in GAMES.values() if hasattr(g,'definition')},
                     'profiles':{g:self.profile(g) for g in GAMES},
                     'connections':{g:self.connection(g) for g in GAMES},'job':dict(self.job),'history':self.history(),
                     'model_available':(self.root/'models/laya/combochan-model.json').exists()}
@@ -181,9 +228,14 @@ class Dashboard:
                 value=data.get(key,profile[key])
                 if not isinstance(value,str) or len(value)>2048 or '\x00' in value: raise ValueError('Invalid path.')
                 profile[key]=value.strip().strip('"')
+            snapshots=data.get('snapshots', [profile['snapshot']] if 'snapshot' in data else profile.get('snapshots',[profile['snapshot']]))
+            if not isinstance(snapshots,list) or not 1<=len(snapshots)<=100 or any(not isinstance(p,str) or not p.strip().strip(chr(34)) or len(p)>2048 or '\x00' in p for p in snapshots):
+                raise ValueError('Provide 1-100 save-state paths.')
+            profile['snapshots']=[p.strip().strip(chr(34)) for p in snapshots]
+            profile['snapshot']=profile['snapshots'][0]
             profile['rules']=validate_rules(data.get('rules',profile['rules']),game)
             old=self.profile(game.id)
-            if profile['emulator']!=old['emulator'] or profile['snapshot']!=old['snapshot']:
+            if profile['emulator']!=old['emulator'] or profile['snapshots']!=old.get('snapshots',[old['snapshot']]):
                 profile.pop('session',None)
             self.config[game.id]=profile
             atomic_json(self.data/'config.json',self.config)
@@ -196,19 +248,30 @@ class Dashboard:
             exe=Path(profile['emulator']); snapshot=Path(profile['snapshot'])
             if not exe.is_file() or exe.name.lower() not in game.executable_names:
                 raise ValueError('Select the Fightcade fcadefbneo.exe executable.')
-            if not snapshot.is_file() or snapshot.suffix.lower() not in game.state_extensions: raise ValueError('Select an existing .fs save state.')
-            if snapshot.stat().st_size>64*1024*1024: raise ValueError('Save state exceeds the supported 64 MB limit.')
+            for source in profile['snapshots']:
+                state=Path(source)
+                if not state.is_file() or state.suffix.lower() not in game.state_extensions: raise ValueError('Select an existing .fs save state: '+source)
+                if state.stat().st_size>64*1024*1024: raise ValueError('Save state exceeds the supported 64 MB limit: '+source)
             session=self.data/'sessions'/uuid.uuid4().hex
             (session/'bridge').mkdir(parents=True)
-            shutil.copy2(snapshot,session/'bridge/root.fs')
-            digest=hashlib.sha256((session/'bridge/root.fs').read_bytes()).hexdigest()
+            snapshots=[]
+            for index,source in enumerate(profile['snapshots']):
+                filename='root.fs' if index==0 else f'state_{index+1}.fs'
+                target=session/'bridge'/filename
+                shutil.copy2(source,target)
+                snapshots.append({'file':filename,'source':source,'snapshot_sha256':hashlib.sha256(target.read_bytes()).hexdigest()})
+            digest=snapshots[0]['snapshot_sha256']
             # JSON quoting with ASCII paths is valid Lua; use decimal escapes for non-ASCII UTF-8.
             def lua_string(value):
                 return '"'+''.join(chr(b) if 32<=b<127 and b not in (34,92) else '\\%03d'%b for b in value.encode('utf-8'))+'"'
             script='COMBOCHAN_BRIDGE_DIR = '+lua_string((session/'bridge').as_posix()+'/')+'\n'
+            if hasattr(game,'session_script'):
+                script+=game.session_script()
+                atomic_json(session/'game-profile.json',game.definition)
+            else: script+='COMBOCHAN_GAME = nil\n'
             script+='return assert(loadfile('+lua_string((self.root/game.runner_path).as_posix())+'))()\n'
             (session/'connect.lua').write_text(script,encoding='ascii')
-            atomic_json(session/'session.json',{'game':game.id,'source':str(snapshot),'snapshot_sha256':digest,'created':time.time()})
+            atomic_json(session/'session.json',{'game':game.id,'source':str(snapshot),'snapshot_sha256':digest,'snapshots':snapshots,'created':time.time(),'profile_sha256':getattr(game,'profile_sha256',None)})
             profile['session']=str(session)
             self.config[game.id]=profile
             atomic_json(self.data/'config.json',self.config)
@@ -241,6 +304,9 @@ class Dashboard:
                 raise ValueError('Laya weights are not installed. Use the CLI model-download command or select another policy.')
             run_id=uuid.uuid4().hex
             config={'game':game.id,'session':str(session),'rules':rules,'action':action,'model':str(self.root/'models/laya')}
+            prepared=read_json(session/'session.json',{})
+            config['snapshots']=prepared.get('snapshots',[{'file':'root.fs','source':prepared.get('source',''),'snapshot_sha256':prepared['snapshot_sha256']}])
+            if hasattr(game,'definition'): config['game_profile']=game.definition
             if action=='replay':
                 path=self.result_files().get(data.get('result_id'))
                 if path is None: raise ValueError('Result not found.')
@@ -248,8 +314,11 @@ class Dashboard:
                 result=result.get('result',result)
                 if result.get('game',game.id)!=game.id: raise ValueError('Result belongs to another game.')
                 config['replay']=result['best']
-                if config['replay']['snapshot_sha256']!=read_json(session/'session.json',{})['snapshot_sha256']:
-                    raise ValueError('Prepare the original save state before replaying this result.')
+                if getattr(game,'profile_sha256',None)!=config['replay'].get('profile_sha256'):
+                    raise ValueError('Replay requires the original game profile.')
+                matching=next((s for s in config['snapshots'] if s['snapshot_sha256']==config['replay']['snapshot_sha256']),None)
+                if matching is None: raise ValueError('Prepare the original save state before replaying this result.')
+                config['snapshot_file']=matching['file']
             (session/'cancel.flag').unlink(missing_ok=True)
             task_path=session/(run_id+'.job.json')
             atomic_json(task_path,config)
@@ -263,6 +332,7 @@ class Dashboard:
             return {'id':run_id}
 
     def watch(self,process,run_id):
+        terminal=None
         for line in process.stdout:
             with self.lock:
                 if self.job.get('id')!=run_id: return
@@ -270,20 +340,24 @@ class Dashboard:
                 except ValueError:
                     self.job['logs']=(self.job['logs']+[line.strip()[:500]])[-30:]; continue
                 if self.job.get('stage')=='stopping' and event.get('stage') in BUSY: event.pop('stage',None)
+                if event.get('stage') in ('complete','failed','cancelled'):
+                    terminal=event.pop('stage')
                 self.job.update(event)
                 if 'result' in event:
-                    atomic_json(self.data/'runs'/(run_id+'.json'),{'id':run_id,'created':time.time(),'result':event['result']})
+                    result_id=run_id+(f"-{event['queue_index']}" if 'queue_index' in event else '')
+                    atomic_json(self.data/'runs'/(result_id+'.json'),{'id':result_id,'created':time.time(),'result':event['result']})
                     self.job.pop('result',None)
         code=process.wait()
         with self.lock:
-            if self.job.get('id')==run_id and self.job['stage'] in BUSY:
-                self.job.update(stage='failed',message=f'Worker exited before finishing (code {code}). Check the run log.')
+            if self.job.get('id')==run_id:
+                if terminal and (code==0 or terminal=='failed'): self.job['stage']=terminal
+                else: self.job.update(stage='failed',message=f'Worker exited before finishing (code {code}). Check the run log.')
 
     def stop(self):
         with self.lock:
             if self.job['stage'] not in BUSY: return {'message':'No active job.'}
             (Path(self.job['session'])/'cancel.flag').write_text('stop',encoding='ascii')
-            self.job.update(stage='stopping',message='Stopping after the active batch. Keep the emulator running until it finishes.')
+            self.job.update(stage='stopping',message='Stopping after the active batch; remaining queued states will not run. Keep the emulator running until it finishes.')
             return {'message':self.job['message']}
 
 
@@ -311,12 +385,15 @@ class Handler(BaseHTTPRequestHandler):
         if not self.valid_host(): return self.send({'error':'Invalid host'},403)
         path=urlparse(self.path).path
         if path=='/api/state': return self.send(self.server.app.status())
+        if path=='/api/game-profile-template':
+            from .game_profile import template
+            return self.send(template())
         if path=='/api/bootstrap': return self.send({'token':self.server.app.token})
         if path.startswith('/api/export/'):
             result=self.server.app.result_files().get(path.rsplit('/',1)[-1])
             if result is None: return self.send({'error':'Result not found'},404)
             return self.send(read_json(result,{}))
-        names={'/':'index.html','/app.js':'app.js','/style.css':'style.css'}
+        names={'/':'index.html','/app.js':'app.js','/game-wizard.js':'game-wizard.js','/style.css':'style.css'}
         if path not in names: return self.send({'error':'Not found'},404)
         file=Path(__file__).with_name('web')/names[path]
         kind={'html':'text/html','js':'application/javascript','css':'text/css'}[file.suffix[1:]]
@@ -335,6 +412,11 @@ class Handler(BaseHTTPRequestHandler):
             app=self.server.app
             path=urlparse(self.path).path
             if path=='/api/save': result=app.save(data)
+            elif path=='/api/game-profiles/save': result=app.save_game_profile(data)
+            elif path=='/api/game-profiles/validate':
+                from .game_profile import ConfiguredGame
+                game=ConfiguredGame(data.get('definition'))
+                result={'valid':True,'profile_sha256':game.profile_sha256}
             elif path=='/api/prepare': result=app.prepare(data)
             elif path=='/api/launch': result=app.launch(data['game'])
             elif path=='/api/start': result=app.start(data)
@@ -343,7 +425,7 @@ class Handler(BaseHTTPRequestHandler):
             elif path=='/api/results/clear': result=app.clear_results(data)
             elif path=='/api/results/restore': result=app.restore_results(data)
             elif path=='/api/pick':
-                if data.get('kind') not in ('emulator','snapshot'): raise ValueError('Unknown file kind.')
+                if data.get('kind') not in ('emulator','snapshot','snapshots'): raise ValueError('Unknown file kind.')
                 try:
                     response=subprocess.run([sys.executable,'-m','combochan.file_picker',data['kind']],cwd=app.root,
                                             capture_output=True,text=True,encoding='utf-8',timeout=120,
@@ -362,9 +444,17 @@ def main():
     parser=argparse.ArgumentParser(description='ComboChan local dashboard')
     parser.add_argument('--port',type=int,default=8790)
     parser.add_argument('--open',action='store_true')
+    parser.add_argument('--game-profile',type=Path,action='append',default=[],help='Load a custom FBNeo JSON profile; repeat for multiple games.')
     args=parser.parse_args()
+    from .game_profile import ConfiguredGame
+    try:
+        for path in args.game_profile:
+            game=ConfiguredGame(json.loads(path.read_text(encoding='utf-8')))
+            if game.id in GAMES: raise ValueError('Duplicate game id: '+game.id)
+            GAMES[game.id]=game
+    except (OSError,ValueError) as exc: parser.error(str(exc))
     try: server=Server(('127.0.0.1',args.port),Dashboard())
-    except OSError as exc: raise SystemExit(f'Cannot start dashboard: {exc}. Try --port 8791.')
+    except (OSError,ValueError) as exc: raise SystemExit(f'Cannot start dashboard: {exc}. Try --port 8791.')
     url=f'http://127.0.0.1:{server.server_port}'
     print('ComboChan dashboard: '+url,flush=True)
     if args.open: webbrowser.open(url)

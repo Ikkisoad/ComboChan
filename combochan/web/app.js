@@ -49,15 +49,18 @@ function readRules() {
   if(!result.groups.length && !result.custom_moves.some(move=>move.enabled)) throw new Error('Enable at least one input group or custom move.');
   return result;
 }
-function setupData() { return {game:currentGame,emulator:$('emulator').value,snapshot:$('snapshot').value,rules:readRules()}; }
-function changedPaths() { const profile=state?.profiles[currentGame]; return !profile || $('emulator').value.trim()!==profile.emulator || $('snapshot').value.trim()!==profile.snapshot; }
+function snapshotPaths() { return $('snapshot').value.split(/\r?\n/).map(p=>p.trim().replace(/^"|"$/g,'')).filter(Boolean); }
+function setupData() { return {game:currentGame,emulator:$('emulator').value,snapshots:snapshotPaths(),rules:readRules()}; }
+function changedPaths() { const profile=state?.profiles[currentGame]; return !profile || $('emulator').value.trim()!==profile.emulator || JSON.stringify(snapshotPaths())!==JSON.stringify(profile.snapshots||[profile.snapshot]); }
 function chooseGame(id) {
   currentGame=id;
   const game=state.games.find(game=>game.id===id), profile=state.profiles[id];
   $('breadcrumb-game').textContent=game.title; $('game-title').replaceChildren(document.createTextNode(game.title),el('span','.','title-dot'));
   $('rom-label').textContent=game.rom.toUpperCase(); $('emulator-label').textContent=game.emulator;
-  $('emulator').value=profile.emulator; $('snapshot').value=profile.snapshot;
+  $('emulator').value=profile.emulator; $('snapshot').value=(profile.snapshots||[profile.snapshot]).join('\n');
   $('capability-note').textContent=game.limits;
+  $('add-lilith').hidden=id!=='vampire-savior';
+  $('edit-game-profile').hidden=!state.game_definitions?.[id];
   $('input-groups').replaceChildren(...game.groups.map(group=>{
     const label=el('label',undefined,'group-option'), input=el('input'); input.type='checkbox'; input.dataset.group=group.id;
     input.addEventListener('change',markDirty); label.append(input,document.createTextNode(group.label)); return label;
@@ -107,13 +110,13 @@ function renderHistory() {
   $('results').replaceChildren(...history.map(result=>{
     const row=el('tr'), name=el('td'), route=el('div',result.notation.replace(/^root\s*>\s*/,''),'route-name');
     const date=new Date(result.created*1000).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
-    name.append(route,el('div',`${date} · ${result.evaluated} trials`,'route-meta'));
+    name.append(route,el('div',`${date} · ${result.evaluated} trials${result.snapshot_source?' · '+result.snapshot_source.split(/[\\/]/).pop():''}`,'route-meta'));
     const damage=el('td',String(result.damage),'damage-cell'), policy=el('td',result.policy==='laya'?'Laya':result.policy==='random'?'Random':'Heuristic');
     const validation=el('td'); validation.title=result.failed_validation?'The route failed repeatability or defensive replay checks. It is not a verified combo.':''; validation.append(el('span',result.verified?'✓ Verified combo':result.failed_validation?'Failed validation':'Unverified',result.verified?'verified':'candidate'));
     const action=el('td'), buttons=el('div',undefined,'result-actions'), replay=el('button','Replay ↗'); replay.type='button';
     const connection=state.connections[currentGame];
-    replay.disabled=pending||busyStages.has(state.job.stage)||!connection.connected||result.snapshot_sha256!==connection.snapshot_sha256;
-    replay.title=result.snapshot_sha256!==connection.snapshot_sha256?'Prepare this result’s original save state to replay.':'Replay at normal speed';
+    replay.disabled=pending||busyStages.has(state.job.stage)||!connection.connected||!(connection.snapshot_hashes||[connection.snapshot_sha256]).includes(result.snapshot_sha256);
+    replay.title=!(connection.snapshot_hashes||[connection.snapshot_sha256]).includes(result.snapshot_sha256)?'Prepare this result’s original save state to replay.':'Replay at normal speed';
     replay.addEventListener('click',()=>perform(async()=>{await api('/api/start',{game:currentGame,action:'replay',result_id:result.id,rules:readRules()});}));
     const download=el('a','Export'); download.href='/api/export/'+encodeURIComponent(result.id); download.download='combochan-'+result.id+'.json';
     const favorite=el('button',result.favorite?'★ Favorited':'☆ Favorite','favorite-button');favorite.type='button';
@@ -134,6 +137,7 @@ function render() {
   $('run-stage').textContent=job.stage==='idle'?'READY WHEN YOU ARE':job.stage.toUpperCase();
   $('run-heading').textContent=titles[job.stage]||job.stage;
   $('run-message').textContent=job.stage==='idle'?(connection.connected?'Runner connected. Start a search or check restoration first.':connection.prepared?'Load your prepared session script to connect the runner.':'Prepare a session to get started.'):job.message;
+  if(job.queue_total) $('run-message').textContent=`State ${job.queue_index} of ${job.queue_total} · ${(job.snapshot_source||'').split(/[\\/]/).pop()} — ${job.message}`;
   const history=state.history.filter(r=>r.game===currentGame);
   $('best-damage').textContent=job.damage ?? (history.length?Math.max(...history.map(r=>r.damage)):'—');
   $('trial-count').textContent=job.completed || '—';
@@ -146,11 +150,13 @@ function render() {
   $('run-log').textContent=(job.logs||[]).join('\n')||job.message||'No events yet.';
   renderControls(); renderHistory();
 }
-async function refresh() { state=await api('/api/state'); offline=false; if(!initialized) {
-  initialized=true; $('game-count').textContent=String(state.games.length).padStart(2,'0');
+let gameTabsKey='';
+function renderGameTabs() {
+  const nextKey=JSON.stringify(state.games.map(g=>[g.id,g.title]));
+  if(gameTabsKey===nextKey)return;gameTabsKey=nextKey; $('game-count').textContent=String(state.games.length).padStart(2,'0');
   $('games').replaceChildren(...state.games.map(game=>{const button=el('button',undefined,'game-tab'); button.dataset.game=game.id; button.type='button'; button.append(el('span',game.badge||game.title.slice(0,2),'game-icon'),el('span',game.title),el('span','›','chevron')); button.addEventListener('click',()=>{if(dirty && !confirm('Discard unsaved settings and switch games?'))return;chooseGame(game.id)}); return button;}));
-  chooseGame(state.games[0].id);
-} else render(); }
+}
+async function refresh() { state=await api('/api/state'); offline=false; renderGameTabs(); if(!initialized) {initialized=true;chooseGame(state.games[0].id)} else render(); }
 async function perform(callback) { if(pending)return; pending=true;hideNotice();renderControls();try { await callback(); await refresh(); } catch(error) { notice(error.message); } finally {pending=false;renderControls();if(state)renderHistory();} }
 function renderCustomMoves(moves) {
   $('custom-moves').replaceChildren();
@@ -182,7 +188,7 @@ $('undo-clear-results').addEventListener('click',()=>perform(async()=>{await api
 $('dismiss-notice').addEventListener('click',hideNotice);
 $('resources').addEventListener('change',()=>{$('cap-field').hidden=$('resources').value!=='cap'});
 document.querySelectorAll('.rules-panel input,.rules-panel select,#emulator,#snapshot').forEach(input=>input.addEventListener('input',markDirty));
-$('reset-rules').addEventListener('click',()=>{loadRules(defaults);markDirty()});
+$('reset-rules').addEventListener('click',()=>{const game=state.games.find(g=>g.id===currentGame);loadRules({...defaults,groups:game.groups.map(g=>g.id),true_combo:game.combo_validated??true});markDirty()});
 $('save').addEventListener('click',()=>perform(async()=>{
   $('save-state').textContent='Saving…';
   try {
@@ -197,9 +203,7 @@ $('launch').addEventListener('click',()=>perform(async()=>{const result=await ap
 $('start').addEventListener('click',()=>perform(async()=>{await api('/api/start',{game:currentGame,action:'search',rules:readRules()})}));
 $('check').addEventListener('click',()=>perform(async()=>{await api('/api/start',{game:currentGame,action:'check',rules:readRules()})}));
 $('stop').addEventListener('click',()=>perform(async()=>{await api('/api/stop',{})}));
-document.querySelectorAll('[data-pick]').forEach(button=>button.addEventListener('click',()=>perform(async()=>{const result=await api('/api/pick',{kind:button.dataset.pick});if(result.path){$(button.dataset.pick).value=result.path;markDirty()}})));
+document.querySelectorAll('[data-pick]').forEach(button=>button.addEventListener('click',()=>perform(async()=>{const result=await api('/api/pick',{kind:button.dataset.pick});if(result.paths?.length){$('snapshot').value=[...snapshotPaths(),...result.paths].join('\n');markDirty()}else if(result.path){$(button.dataset.pick).value=result.path;markDirty()}})));
 $('copy-script').addEventListener('click',async()=>{try {await navigator.clipboard.writeText($('script-path').value);notice('Session script path copied.',true)}catch{$('script-path').select();notice('Select and copy the script path from the field.')}});
-$('future-game').addEventListener('click',()=>$('future-dialog').showModal());
-$('close-future').addEventListener('click',()=>$('future-dialog').close());$('future-ok').addEventListener('click',()=>$('future-dialog').close());
 async function boot(){try{token=(await api('/api/bootstrap')).token;await refresh()}catch(error){notice('Dashboard connection failed: '+error.message)}}
 boot();setInterval(async()=>{try{if(!pending)await refresh()}catch{offline=true;$('connection').textContent='Dashboard offline';renderControls();}},1800);
