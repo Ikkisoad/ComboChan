@@ -6,10 +6,11 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import re
 import time
 import uuid
 
-BUTTONS = frozenset("U D L R F B LP MP HP LK MK HK".split())
+BUTTONS = frozenset("U D L R F B LP MP HP LK MK HK A1 A2".split())
 
 
 @dataclass(frozen=True)
@@ -49,7 +50,7 @@ class Trial:
 
 class Bridge:
     def __init__(self, directory: Path, timeout: float = 180, rom: str = "vsavj", snapshot: str = "root.fs"):
-        if not snapshot.endswith(".fs") or not snapshot[:-3] or any(not (c.isascii() and (c.isalnum() or c in "_-")) for c in snapshot[:-3]):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+\.(?:fs|state)", snapshot):
             raise ValueError("Invalid snapshot filename")
         self.snapshot = snapshot
         self.rom = rom
@@ -65,7 +66,7 @@ class Bridge:
             t.validate()
         ready_path = self.directory / "ready.json"
         if not ready_path.exists():
-            raise RuntimeError("Load bridge/runner.lua in FBNeo first")
+            raise RuntimeError("Connect the prepared emulator runner first")
         ready = json.loads(ready_path.read_text())
         if ready.get("protocol") != 1 or ready.get("rom") != self.rom:
             raise RuntimeError("Wrong bridge protocol or ROM")
@@ -88,7 +89,7 @@ class Bridge:
             with os.fdopen(fd, "w") as f:
                 f.write(job)
             if request.exists():
-                raise RuntimeError("An unconsumed request exists; resume FBNeo before retrying")
+                raise RuntimeError("An unconsumed request exists; resume the emulator before retrying")
             tmp = self.directory / f"{job}.request.tmp"
             tmp.write_text("\n".join(lines) + "\n", encoding="ascii")
             os.replace(tmp, request)
@@ -98,7 +99,7 @@ class Bridge:
                 if error.exists():
                     raise RuntimeError(error.read_text())
                 if time.monotonic() - started > self.timeout:
-                    raise TimeoutError(f"Job {job} timed out. Focus/unpause FBNeo; inspect its Lua console. "
+                    raise TimeoutError(f"Job {job} timed out. Unpause the emulator; inspect the session error file. "
                                        "Pending requests/results remain in artifacts/bridge.")
                 time.sleep(0.1)
             records = [json.loads(line) for line in result.read_text().splitlines()]
@@ -112,7 +113,8 @@ class Bridge:
             manifest = {"job": job, "snapshot_sha256": snapshot_hash, "rom": ready['rom'],
                         "profile_sha256": ready.get("profile_sha256"),
                         "adapter_sha256": hashlib.sha256(ready["script_content"].encode("utf-8") if "script_content" in ready else Path(ready["script"]).read_bytes()).hexdigest(),
-                        "speed": speed, "wall_seconds": time.monotonic() - started,
+                        "speed": speed, "actual_speed": ready.get("actual_speed", speed),
+                        "backend": ready.get("backend", "fbneo"), "wall_seconds": time.monotonic() - started,
                         "trials": [asdict(t) for t in trials], "raw_results": str(result)}
             (self.directory / f"{job}.manifest.json").write_text(json.dumps(manifest, indent=2))
             return records, manifest

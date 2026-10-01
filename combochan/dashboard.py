@@ -89,12 +89,12 @@ class Dashboard:
 
     def profile(self,game_id):
         game=get_game(game_id)
-        default_exe=Path('G:/Games/Fightcade/emulator/fbneo/fcadefbneo.exe')
-        default_state=Path('G:/Games/Fightcade/emulator/fbneo/savestates/vsavj slot 01.fs')
+        default_exe=Path(getattr(game,'default_executable','G:/Games/Fightcade/emulator/fbneo/fcadefbneo.exe'))
+        default_state=Path(getattr(game,'default_snapshot','G:/Games/Fightcade/emulator/fbneo/savestates/vsavj slot 01.fs'))
         value={ 'emulator':str(default_exe) if default_exe.exists() else '',
-                 'snapshot':str(default_state) if game.id=='vampire-savior' and default_state.exists() else '',
+                 'snapshot':str(default_state) if (game.id=='vampire-savior' or hasattr(game,'default_snapshot')) and default_state.exists() else '',
                  'rules':{**DEFAULT_RULES,'groups':[g['id'] for g in game.groups],
-                          'true_combo':getattr(game,'definition',{}).get('combo_validated',True)},**self.config.get(game.id,{})}
+                          'true_combo':getattr(game,'definition',{}).get('combo_validated',getattr(game,'combo_validated',True))},**self.config.get(game.id,{})}
 
         if hasattr(game,'definition'):
             rules={**value['rules']}
@@ -104,6 +104,12 @@ class Dashboard:
             if not game.definition['combo_validated']: rules['true_combo']=False
             if 'stocks' not in game.definition['players']['p1']: rules['resources']='state'
             value['rules']=rules
+        if getattr(game,'combo_validated',True) is False:
+            value['rules']={**value['rules'],'true_combo':False}
+        if game.id=='marvel-vs-capcom-2' and set(value['rules'].get('groups',[]))=={'normals','motions','movement'}:
+            # A saved profile that enabled every original category keeps that
+            # choice when assist and hyper categories are introduced.
+            value['rules']={**value['rules'],'groups':value['rules']['groups']+['assists','supers']}
         return value
 
     def save_game_profile(self,data):
@@ -176,7 +182,9 @@ class Dashboard:
             best=result['best']
             items.append({'id':id,'favorite':bool(flags.get('favorite')),'game':result.get('game','vampire-savior'),'created':path.stat().st_mtime,
                 'snapshot_source':result.get('snapshot_source',''),'damage':best.get('damage',0),'notation':best.get('notation',best.get('label','Saved route')),
-                'verified':best.get('verified',False),'failed_validation':best.get('reproduced') is False,'policy':result.get('rules',{}).get('policy',result.get('policy','heuristic')),
+                'verified':best.get('verified',False),'escape_checked':best.get('escape_checked',False),
+                'damage_only':result.get('game')=='marvel-vs-capcom-2',
+                'failed_validation':best.get('reproduced') is False,'policy':result.get('rules',{}).get('policy',result.get('policy','heuristic')),
                 'evaluated':result.get('evaluated',0),'snapshot_sha256':best.get('snapshot_sha256',result.get('snapshot_sha256'))})
         return sorted(items,key=lambda r:r['created'],reverse=True)
 
@@ -247,16 +255,17 @@ class Dashboard:
             game=get_game(data['game'])
             exe=Path(profile['emulator']); snapshot=Path(profile['snapshot'])
             if not exe.is_file() or exe.name.lower() not in game.executable_names:
-                raise ValueError('Select the Fightcade fcadefbneo.exe executable.')
+                raise ValueError('Select the '+game.emulator_name+' executable ('+', '.join(game.executable_names)+').')
             for source in profile['snapshots']:
                 state=Path(source)
-                if not state.is_file() or state.suffix.lower() not in game.state_extensions: raise ValueError('Select an existing .fs save state: '+source)
+                if not state.is_file() or state.suffix.lower() not in game.state_extensions: raise ValueError('Select an existing '+', '.join(game.state_extensions)+' save state: '+source)
                 if state.stat().st_size>64*1024*1024: raise ValueError('Save state exceeds the supported 64 MB limit: '+source)
             session=self.data/'sessions'/uuid.uuid4().hex
             (session/'bridge').mkdir(parents=True)
             snapshots=[]
             for index,source in enumerate(profile['snapshots']):
-                filename='root.fs' if index==0 else f'state_{index+1}.fs'
+                extension=game.state_extensions[0]
+                filename='root'+extension if index==0 else f'state_{index+1}'+extension
                 target=session/'bridge'/filename
                 shutil.copy2(source,target)
                 snapshots.append({'file':filename,'source':source,'snapshot_sha256':hashlib.sha256(target.read_bytes()).hexdigest()})
@@ -267,8 +276,9 @@ class Dashboard:
             script='COMBOCHAN_BRIDGE_DIR = '+lua_string((session/'bridge').as_posix()+'/')+'\n'
             if hasattr(game,'session_script'):
                 script+=game.session_script()
-                atomic_json(session/'game-profile.json',game.definition)
+                if hasattr(game,'definition'): atomic_json(session/'game-profile.json',game.definition)
             else: script+='COMBOCHAN_GAME = nil\n'
+            if hasattr(game,'prepare_runtime'): game.prepare_runtime(exe,session,snapshots)
             script+='return assert(loadfile('+lua_string((self.root/game.runner_path).as_posix())+'))()\n'
             (session/'connect.lua').write_text(script,encoding='ascii')
             atomic_json(session/'session.json',{'game':game.id,'source':str(snapshot),'snapshot_sha256':digest,'snapshots':snapshots,'created':time.time(),'profile_sha256':getattr(game,'profile_sha256',None)})
@@ -286,9 +296,10 @@ class Dashboard:
             if self.connection(game_id)['connected']: raise ValueError('The runner is already connected.')
             self.owned_emulators=[p for p in self.owned_emulators if p.poll() is None]
             if self.owned_emulators: raise ValueError('The dashboard already opened an emulator. Load the session script there or close it before launching another.')
-            process=subprocess.Popen(game.launch_arguments(exe,session/'connect.lua'),cwd=exe.parent)
+            arguments=game.launch_arguments(exe,session/'connect.lua')
+            process=subprocess.Popen(arguments,cwd=Path(arguments[0]).parent)
             self.owned_emulators.append(process)
-            return {'message':'Emulator launched. If it does not connect, load the prepared Lua script using the instructions below.'}
+            return {'message':getattr(game,'launch_message','Emulator launched. If it does not connect, load the prepared Lua script using the instructions below.')}
 
     def start(self,data):
         with self.lock:
@@ -314,7 +325,7 @@ class Dashboard:
                 result=result.get('result',result)
                 if result.get('game',game.id)!=game.id: raise ValueError('Result belongs to another game.')
                 config['replay']=result['best']
-                if getattr(game,'profile_sha256',None)!=config['replay'].get('profile_sha256'):
+                if getattr(game,'profile_sha256',None)!=config['replay'].get('profile_sha256') and not (hasattr(game,'replay_compatible') and game.replay_compatible(config['replay'])):
                     raise ValueError('Replay requires the original game profile.')
                 matching=next((s for s in config['snapshots'] if s['snapshot_sha256']==config['replay']['snapshot_sha256']),None)
                 if matching is None: raise ValueError('Prepare the original save state before replaying this result.')

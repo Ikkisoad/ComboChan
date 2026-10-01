@@ -59,6 +59,16 @@ function chooseGame(id) {
   $('rom-label').textContent=game.rom.toUpperCase(); $('emulator-label').textContent=game.emulator;
   $('emulator').value=profile.emulator; $('snapshot').value=(profile.snapshots||[profile.snapshot]).join('\n');
   $('capability-note').textContent=game.limits;
+  $('emulator').placeholder=game.emulator==='Flycast Dojo'?'Locate flycast.exe':'Locate fcadefbneo.exe';
+  $('snapshot').placeholder=`One ${game.state_extensions?.[0]||'.fs'} save-state path per line`;
+  const help=$('connect-help');
+  help.querySelector('summary').textContent=game.connection_steps?'Connect the isolated Flycast session':'Already running FBNeo? Connect the script manually';
+  const steps=game.connection_steps||['Open Game → Lua Scripting → New Lua Script Window.', 'Stop the current script before changing its path. Load the session script below and click Run.', 'Unpause and close menus. Disable Misc → Options → Auto pause for background runs.'];
+  help.querySelector('ol').replaceChildren(...steps.map(text=>el('li',text)));
+  help.querySelector('p').textContent=game.connection_note||'The dedicated runner takes over player inputs while loaded. Stop it in the Lua window to return to manual play.';
+  help.querySelector('.input-with-button').hidden=Boolean(game.connection_steps);
+  document.querySelector('.rule-toggle p').textContent=game.combo_validated===false?'True-combo verification is unavailable until hitstun is calibrated. Defensive replay checks still run for MVC2.':'Reject recovery gaps and test guard / jump escapes.';
+  $('start').replaceChildren(document.createTextNode(game.combo_validated===false?'Start damage search ':'Start combo search '),el('span','→'));
   $('add-lilith').hidden=id!=='vampire-savior';
   $('edit-game-profile').hidden=!state.game_definitions?.[id];
   $('input-groups').replaceChildren(...game.groups.map(group=>{
@@ -80,7 +90,9 @@ function renderControls() {
   for(const id of ['prepare','save','reset-rules','add-move','add-lilith']) $(id).disabled=blocked;
   document.querySelectorAll('[data-pick]').forEach(b=>b.disabled=blocked);
   $('launch').disabled=blocked||!connection.prepared||connection.connected||pathsChanged;
-  const reason=offline?'Dashboard is offline. Restart Start Dashboard.cmd, then refresh this page.':pending?'Please wait for the current request to finish.':busy?'An experiment is active. Wait for it to finish or stop it first.':pathsChanged?'Emulator or save-state paths changed. Click Prepare session to connect this setup.':!connection.prepared?'Select an emulator and save state, then click Prepare session.':!connection.connected?'The session runner is not responding. Launch the emulator or load the prepared script, then unpause the game, close menus, and disable Misc → Options → Auto pause.':connection.pending?'The runner has an unfinished request. Let it finish; if it was interrupted, prepare a new session.':'';
+  const game=state.games.find(g=>g.id===currentGame);
+  const disconnected=game.connection_steps?'Launch the isolated Flycast session and keep its menus closed.':'Launch the emulator or load the prepared script, then unpause the game, close menus, and disable Misc → Options → Auto pause.';
+  const reason=offline?'Dashboard is offline. Restart Start Dashboard.cmd, then refresh this page.':pending?'Please wait for the current request to finish.':busy?'An experiment is active. Wait for it to finish or stop it first.':pathsChanged?'Emulator or save-state paths changed. Click Prepare session to connect this setup.':!connection.prepared?'Select an emulator and save state, then click Prepare session.':!connection.connected?disconnected:connection.pending?'The runner has an unfinished request. Let it finish; if it was interrupted, prepare a new session.':'';
   $('start').disabled=Boolean(reason);
   $('start').title=reason||'Start a search with the current rules';
   $('start-reason').textContent=reason||'Runner connected. Ready to search with the current rules.';
@@ -90,6 +102,7 @@ function renderControls() {
   $('copy-script').disabled=!connection.script;
   $('emulator').disabled=busy; $('snapshot').disabled=busy;
   document.querySelectorAll('.rules-panel input,.rules-panel select,[data-remove-move]').forEach(input=>input.disabled=busy);
+  if(game.combo_validated===false) { $('true-combo').disabled=true; $('true-combo').checked=false; }
   $('cap-field').hidden=$('resources').value!=='cap';
 }
 function renderHistory() {
@@ -112,7 +125,7 @@ function renderHistory() {
     const date=new Date(result.created*1000).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
     name.append(route,el('div',`${date} · ${result.evaluated} trials${result.snapshot_source?' · '+result.snapshot_source.split(/[\\/]/).pop():''}`,'route-meta'));
     const damage=el('td',String(result.damage),'damage-cell'), policy=el('td',result.policy==='laya'?'Laya':result.policy==='random'?'Random':'Heuristic');
-    const validation=el('td'); validation.title=result.failed_validation?'The route failed repeatability or defensive replay checks. It is not a verified combo.':''; validation.append(el('span',result.verified?'✓ Verified combo':result.failed_validation?'Failed validation':'Unverified',result.verified?'verified':'candidate'));
+    const validation=el('td'); validation.title=result.failed_validation?'The route failed repeatability or defensive replay checks. It is not a verified combo.':result.damage_only?'MVC2 hitstun is uncalibrated. Damage alone does not establish a true combo.':''; validation.append(el('span',result.verified?'✓ Verified combo':result.failed_validation?'Failed validation':result.escape_checked?'Escape checks passed':result.damage_only?'Damage only · gaps possible':'Unverified',result.verified?'verified':'candidate'));
     const action=el('td'), buttons=el('div',undefined,'result-actions'), replay=el('button','Replay ↗'); replay.type='button';
     const connection=state.connections[currentGame];
     replay.disabled=pending||busyStages.has(state.job.stage)||!connection.connected||!(connection.snapshot_hashes||[connection.snapshot_sha256]).includes(result.snapshot_sha256);
@@ -156,7 +169,7 @@ function renderGameTabs() {
   if(gameTabsKey===nextKey)return;gameTabsKey=nextKey; $('game-count').textContent=String(state.games.length).padStart(2,'0');
   $('games').replaceChildren(...state.games.map(game=>{const button=el('button',undefined,'game-tab'); button.dataset.game=game.id; button.type='button'; button.append(el('span',game.badge||game.title.slice(0,2),'game-icon'),el('span',game.title),el('span','›','chevron')); button.addEventListener('click',()=>{if(dirty && !confirm('Discard unsaved settings and switch games?'))return;chooseGame(game.id)}); return button;}));
 }
-async function refresh() { state=await api('/api/state'); offline=false; renderGameTabs(); if(!initialized) {initialized=true;chooseGame(state.games[0].id)} else render(); }
+async function refresh() { state=await api('/api/state'); offline=false; renderGameTabs(); if(!initialized) {initialized=true;const requested=new URLSearchParams(location.search).get('game');chooseGame(state.games.some(g=>g.id===requested)?requested:state.games[0].id)} else render(); }
 async function perform(callback) { if(pending)return; pending=true;hideNotice();renderControls();try { await callback(); await refresh(); } catch(error) { notice(error.message); } finally {pending=false;renderControls();if(state)renderHistory();} }
 function renderCustomMoves(moves) {
   $('custom-moves').replaceChildren();
@@ -198,7 +211,7 @@ $('save').addEventListener('click',()=>perform(async()=>{
   } catch(error) { $('save-state').textContent='Not saved: '+error.message; throw error; }
 }));
 $('connection-help-button').addEventListener('click',()=>{$('connect-help').open=true;$('connect-help').scrollIntoView({behavior:'smooth',block:'center'})});
-$('prepare').addEventListener('click',()=>perform(async()=>{await api('/api/prepare',setupData());dirty=false;$('save-state').textContent='Settings saved locally';$('connect-help').open=true;notice('Session prepared. Launch the emulator or load the generated script in your existing window.',true)}));
+$('prepare').addEventListener('click',()=>perform(async()=>{await api('/api/prepare',setupData());dirty=false;$('save-state').textContent='Settings saved locally';$('connect-help').open=true;notice(state.games.find(g=>g.id===currentGame).connection_steps?'Session prepared. Launch the isolated Flycast emulator.':'Session prepared. Launch the emulator or load the generated script in your existing window.',true)}));
 $('launch').addEventListener('click',()=>perform(async()=>{const result=await api('/api/launch',{game:currentGame});notice(result.message,true)}));
 $('start').addEventListener('click',()=>perform(async()=>{await api('/api/start',{game:currentGame,action:'search',rules:readRules()})}));
 $('check').addEventListener('click',()=>perform(async()=>{await api('/api/start',{game:currentGame,action:'check',rules:readRules()})}));

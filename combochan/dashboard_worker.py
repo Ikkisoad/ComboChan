@@ -20,6 +20,15 @@ class Cancelled(Exception):
     pass
 
 
+def depth_quota(remaining, depths_left, available):
+    """Reserve trials for continuations even when the move library is large."""
+    return min(available, remaining, max(1, (remaining+depths_left-1)//depths_left))
+
+
+def escape_mismatch(reference, defended):
+    return not defended['candidate_valid'] or defended['damage_events'] != reference['damage_events']
+
+
 def timing_options(parent, rules):
     if not parent['steps']:
         return list(range(rules.get('max_start_delay',0)+1))
@@ -70,6 +79,7 @@ def continuation_candidates(parent,actions,rules,vsav_ordering=True):
             notation=prefix+(f'[{delay}f] ' if delay else '')+action.name
             candidates.append({'steps':steps,'notation':notation,'label':f'{delay}f {action.name}',
                                'group':action.group,'last':action.name,'delay':delay,'parent_damage':parent['score']['damage'] if 'score' in parent else 0,
+                               'action_names':parent.get('action_names',[])+[action.name],
                                '_timing_round':round_index,'_action_order':index})
     if parent['steps'] and vsav_ordering and rules.get('auto_timing',True):
         # Spend the first windows on plausible chain continuations, before motion spam.
@@ -107,8 +117,8 @@ def execute(config, emit_event=emit):
     else:
         game=get_game(config['game'])
     session=Path(config['session'])
-    snapshot_file=config.get('snapshot_file','root.fs')
-    bridge=Bridge(session/'bridge',timeout=120,rom=game.rom,snapshot=snapshot_file)
+    snapshot_file=config.get('snapshot_file','root'+game.state_extensions[0])
+    bridge=Bridge(session/'bridge',timeout=getattr(game,'bridge_timeout',120),rom=game.rom,snapshot=snapshot_file)
     rules=config['rules']
     if hasattr(game,'validate_rules'): game.validate_rules(rules)
     snapshot_hash=hashlib.sha256((session/'bridge'/snapshot_file).read_bytes()).hexdigest()
@@ -127,7 +137,8 @@ def execute(config, emit_event=emit):
         raise RuntimeError('The loaded game profile changed. Prepare and connect a new session.')
     if config['action']=='replay':
         replay=config['replay']
-        if replay.get('profile_sha256')!=profile_hash: raise ValueError('Replay requires the original game profile.')
+        if replay.get('profile_sha256')!=profile_hash and not (hasattr(game,'replay_compatible') and game.replay_compatible(replay)):
+            raise ValueError('Replay requires the original game profile.')
         if replay['snapshot_sha256'] != snapshot_hash: raise ValueError('This result uses a different save state.')
         steps=tuple(Step(s['frames'],tuple(s['buttons'])) for s in replay['steps'])
         emit_event(stage='replaying',message='Playing the saved frame inputs at normal speed.')
@@ -143,7 +154,8 @@ def execute(config, emit_event=emit):
         raise RuntimeError('This snapshot did not produce 100 identical traces. Search stopped.')
     initial=records[0]['trace'][0]
     game.validate_initial(initial)
-    starting_hitstun=bool(initial['p2']['stun1'] or initial['p2']['stun2'])
+    stun=(initial['p2']['stun1'],initial['p2']['stun2'])
+    starting_hitstun=None if all(value is None for value in stun) else bool(any(stun))
     gate={'manifest':manifest,'repeatability':checks,'initial_state':initial}
     (session/(snapshot_file+'.verify.json' if snapshot_file!='root.fs' else 'verify.json')).write_text(json.dumps(gate,indent=2),encoding='utf-8')
     if config['action']=='check':
@@ -164,6 +176,8 @@ def execute(config, emit_event=emit):
         pools=[]
         for parent in frontier:
             candidates=continuation_candidates(parent,actions,rules,getattr(game,"vsav_ordering",True))
+            if hasattr(game,'order_continuations'):
+                candidates=game.order_continuations(candidates,parent,rules)
             if candidates:
                 if rules['policy']=='laya':
                     pools.append(candidates)
@@ -173,8 +187,7 @@ def execute(config, emit_event=emit):
         if not pools: break
         candidates=[pool[i] for i in range(max(map(len,pools))) for pool in pools if i<len(pool)]
         remaining=rules['budget']-completed
-        quota=remaining if depth==rules['depth'] else max(len(actions),remaining//(rules['depth']-depth+1))
-        quota=min(remaining,quota,len(candidates))
+        quota=depth_quota(remaining,rules['depth']-depth+1,len(candidates))
         survivors=[]
         offset=0
         while offset<quota and candidates:
@@ -194,12 +207,13 @@ def execute(config, emit_event=emit):
             candidates=[c for c in candidates if id(c) not in chosen_ids]
             emit_event(stage='searching',message=f'Running {len(batch)} emulator trials.',completed=completed,
                        budget=rules['budget'],depth=depth,model_calls=len(policy.calls))
-            trials=[Trial(f'd{depth}_{offset+i}',c['steps'],tail=rules['tail']) for i,c in enumerate(batch)]
+            for candidate in batch:
+                candidate['tail']=(game.trial_tail(candidate,rules) if hasattr(game,'trial_tail') else rules['tail'])
+            trials=[Trial(f'd{depth}_{offset+i}',c['steps'],tail=c['tail']) for i,c in enumerate(batch)]
             records,manifest=run(trials)
             manifests.append(manifest)
             retry_indexes=[]
             for i,(candidate,record) in enumerate(zip(batch,records)):
-                candidate['tail']=rules['tail']
                 preliminary=game.score(record,rules)
                 if rules['tail']<min(600,1200-sum(s.frames for s in candidate['steps'])) and preliminary['damage']>0 and set(preliminary['rejection_reasons'])=={'unresolved_hitstun'}:
                     retry_indexes.append(i)
@@ -210,11 +224,32 @@ def execute(config, emit_event=emit):
                 for i,record in zip(retry_indexes,extended):
                     simulator_frames+=len(records[i]['trace'])-1
                     records[i]=record;batch[i]['tail']=min(600,1200-sum(s.frames for s in batch[i]['steps']))
-            for candidate,record in zip(batch,records):
+            escaped=set()
+            if getattr(game,'escape_checks',False):
+                # Disconnected damage strings otherwise crowd both the beam and
+                # the shortlist before the more thorough final replay checks.
+                references=[game.score(record,rules) for record in records]
+                indexes=[i for i,s in enumerate(references)
+                         if s['candidate_valid'] and s['hit_count']>1
+                         and s['damage']>batch[i]['parent_damage']]
+                if indexes:
+                    emit_event(stage='searching',message=f'Checking {len(indexes)} extensions against standing guard.',depth=depth,completed=completed)
+                    defended,manifest=run([Trial(f'escape_{depth}_{offset+i}',batch[i]['steps'],tail=batch[i]['tail'],defense='stand') for i in indexes])
+                    manifests.append(manifest)
+                    for i,record in zip(indexes,defended):
+                        score=game.score(record,rules)
+                        simulator_frames+=score['frames']
+                        if escape_mismatch(references[i],score): escaped.add(i)
+            for i,(candidate,record) in enumerate(zip(batch,records)):
                 score=game.score(record,rules)
+                if i in escaped:
+                    score['candidate_valid']=False
+                    score['rejection_reasons'].append('guard_escape')
                 candidate['score']=score
                 end_frame=sum(s.frames for s in candidate['steps'])
                 candidate['state']=record['trace'][end_frame]
+                if hasattr(game,'annotate_candidate'):
+                    game.annotate_candidate(candidate,record['trace'],end_frame,rules)
                 candidate['landing_delays']=game.landing_delays(record['trace'],end_frame,rules.get('max_delay',60))
                 # Inputs end before startup/hitstop resolves. Target the observed contact window.
                 contacts=[h['frame']-end_frame for h in score['damage_events'] if h['frame']>=end_frame]
@@ -237,14 +272,15 @@ def execute(config, emit_event=emit):
                 message=f'Tested {completed} input sequences.',elapsed=time.monotonic()-started)
             offset+=len(batch)
         if completed>=rules['budget'] or not survivors: break
-        frontier=select_frontier(survivors,rules['beam'])
+        frontier=(game.select_frontier(survivors,rules['beam']) if hasattr(game,'select_frontier')
+                  else select_frontier(survivors,rules['beam']))
     check_cancel()
     export=None
     validation_attempts=[]
     for candidate in finalists:
         emit_event(stage='validating',completed=completed,damage=candidate['score']['damage'],notation=candidate['notation'],
-                   message='Checking ranked results against guard and jump escapes.')
-        defenses=['neutral','stand','crouch','jump'] if rules['true_combo'] else ['neutral']
+                   message='Checking ranked results against guard and jump escapes.' if rules['true_combo'] or getattr(game,'escape_checks',False) else 'Checking that ranked damage strings reproduce.')
+        defenses=['neutral','stand','crouch','jump'] if rules['true_combo'] or getattr(game,'escape_checks',False) else ['neutral']
         records,manifest=run([Trial('best_'+d,candidate['steps'],tail=candidate.get('tail',rules['tail']),defense=d,repeats=3) for d in defenses])
         manifests.append(manifest)
         scores=[game.score(r,rules) for r in records]
@@ -253,6 +289,7 @@ def execute(config, emit_event=emit):
         checked={'steps':[asdict(s) for s in candidate['steps']],'tail':candidate.get('tail',rules['tail']),'damage':candidate['score']['damage'],
                 'notation':candidate['notation'],'verified':bool(passed and rules['true_combo']),
                 'reproduced':passed,'profile_sha256':profile_hash,'snapshot_sha256':snapshot_hash,'validation':scores,'starting_hitstun':starting_hitstun}
+        checked['escape_checked']=passed and len(defenses)>1
         validation_attempts.append({'notation':checked['notation'],'damage':checked['damage'],'passed':passed})
         if export is None or passed: export=checked
         if passed: break

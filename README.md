@@ -2,6 +2,8 @@
 
 An experimental combo-search bot for **Vampire Savior Japan (`vsavj`) in Fightcade FBNeo**. A Lua runner restores a fixed save state and executes exact frame inputs; Python searches continuations and optionally uses local Laya inference to prioritize them. The emulator measures every result.
 
+The dashboard also includes an experimental **Marvel vs. Capcom 2 (Naomi) / Flycast Dojo** adapter. It searches measured damage strings in an isolated emulator session, with SonSon launcher/aerial priorities, partner assists, hyper inputs and defensive replay checks. True-combo verification is unavailable until MVC2 hitstun is calibrated. See the [Flycast/MVC2 setup guide](docs/FLYCAST_MVC2.md).
+
 The dashboard searches normals, motion inputs, and movement templates for P1 against P2. It uses the resources available in the save state by default, with an optional stock-spending cap. Results mean **best found in the configured search**, not globally optimal combos. Character-specific move coverage remains incomplete. Other compatible FBNeo games can use manually configured JSON profiles. The original CLI search retains its narrower meterless normal-attack scope.
 
 ## Offline architecture smoke test

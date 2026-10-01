@@ -8,7 +8,7 @@ def main():
     from tkinter import filedialog
     root=tk.Tk(); root.withdraw(); root.attributes('-topmost',True)
     kind=sys.argv[1]
-    types=[('FBNeo executable','*.exe')] if kind=='emulator' else [('FBNeo save state','*.fs')]
+    types=[('Emulator executable','*.exe')] if kind=='emulator' else [('Emulator save state','*.fs *.state')]
     if kind=='snapshots':
         result={'paths':list(filedialog.askopenfilenames(title='Add save states to queue',filetypes=types,parent=root))}
     else:

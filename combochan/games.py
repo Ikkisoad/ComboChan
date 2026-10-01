@@ -67,6 +67,10 @@ class VampireSavior:
         custom=[Action(m['name'],parse_sequence(m['sequence']),'custom') for m in rules.get('custom_moves',[]) if m['enabled']]
         return custom+[a for a in self.actions(rules['groups']) if a.name not in rules.get('disabled_actions',[])]
 
+    def validate_rules(self, rules):
+        if any(set(step.buttons) & {'A1','A2'} for action in self.search_actions(rules) for step in action.steps):
+            raise ValueError('A1/A2 are MVC2 assist buttons and are unavailable in Vampire Savior.')
+
     def landing_delays(self, trace, end_frame, limit):
         # vsavj telemetry uses y=40 for the floor in the supported adapter.
         for previous,row in zip(trace[end_frame:],trace[end_frame+1:]):
@@ -105,7 +109,9 @@ class VampireSavior:
         return evaluate(record, max_stocks=cap, require_combo=rules['true_combo'])
 
 
-GAMES = {game.id: game for game in (VampireSavior(),)}
+from .flycast import MarvelVsCapcom2
+
+GAMES = {game.id: game for game in (VampireSavior(), MarvelVsCapcom2())}
 
 
 def get_game(game_id):
