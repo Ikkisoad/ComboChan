@@ -22,6 +22,10 @@ class MovesAndTimingTests(unittest.TestCase):
         self.assertEqual([a.name for a in game.search_actions(rules)],['Demon'])
         rules=validate_rules({**DEFAULT_RULES,'disabled_actions':['LP']},game)
         self.assertNotIn('LP',[a.name for a in game.search_actions(rules)])
+        rules=validate_rules({**DEFAULT_RULES,'disabled_buttons':['LP'],
+                              'custom_moves':[{'name':'LP then HK','sequence':'LP, HK','enabled':True}]},game)
+        self.assertTrue(all('LP' not in step.buttons for action in game.search_actions(rules) for step in action.steps))
+        self.assertNotIn('LP then HK',[action.name for action in game.search_actions(rules)])
 
     def test_start_budget_defaults_to_zero_and_bounds_custom_waits(self):
         from combochan.games import Action

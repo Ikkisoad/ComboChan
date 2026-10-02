@@ -7,7 +7,7 @@ from unittest.mock import patch
 from combochan.bridge import Bridge, Step
 from combochan.dashboard import Dashboard, DEFAULT_RULES, validate_rules
 from combochan.games import get_game
-from combochan.dashboard_worker import execute, depth_quota, continuation_candidates, escape_mismatch
+from combochan.dashboard_worker import execute, depth_quota, continuation_candidates, escape_mismatch, reserve_finisher_trial
 
 
 GAME = get_game('marvel-vs-capcom-2')
@@ -62,6 +62,21 @@ class FlycastScoringTests(unittest.TestCase):
         ground={'last':'623HP','score':{'damage':30},'state':state}
         air={'last':'jump cancel','score':{'damage':12},'state':state,'airborne_observed':True}
         self.assertIs(GAME.select_frontier([ground,air],1)[0],air)
+        air_super={'last':'236PP','score':{'damage':53},'state':state,'airborne_observed':True}
+        self.assertIs(GAME.select_frontier([air_super,air],1)[0],air)
+
+    def test_finisher_gets_a_trial_after_developing_route(self):
+        parent={'score':{'damage':18},'action_names':['df.HP','jump cancel','LP']}
+        finished={'score':{'damage':41},'action_names':['236PP']}
+        normal={'last':'LK'}
+        finisher={'last':'236PP'}
+        other={'last':'df.HP'}
+        pools=[[normal,finisher],[other]]
+        interleaved=[normal,other,finisher]
+        self.assertEqual(reserve_finisher_trial(interleaved,pools,[parent,finished],{'236PP'},3),
+                         [normal,finisher,other])
+        self.assertEqual(reserve_finisher_trial(interleaved,pools,[parent,finished],set(),3),
+                         interleaved)
 
     def test_measured_damage_does_not_claim_hitstun_or_combo(self):
         score = GAME.score(damage_record(), RULES)
@@ -113,6 +128,19 @@ class FlycastScoringTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'Vampire Savior'):
             validate_rules({**DEFAULT_RULES,'custom_moves':[{'name':'bad','sequence':'A1','enabled':True}]},get_game('vampire-savior'))
 
+    def test_disabling_assist_buttons_removes_built_in_and_custom_calls(self):
+        rules=validate_rules({**RULES,'groups':['normals','assists','supers'],
+                              'disabled_buttons':['A1','A2'],
+                              'custom_moves':[{'name':'Assist then punch','sequence':'A1, HP','enabled':True}]},GAME)
+        actions=GAME.search_actions(rules)
+        self.assertNotIn('Assist 1',[a.name for a in actions])
+        self.assertNotIn('Assist 2',[a.name for a in actions])
+        self.assertNotIn('Assist then punch',[a.name for a in actions])
+        self.assertIn('236PP',[a.name for a in actions])
+        self.assertFalse(any({'A1','A2'} & set(step.buttons) for action in actions for step in action.steps))
+        with self.assertRaisesRegex(ValueError,'disabled button'):
+            validate_rules({**RULES,'disabled_buttons':['A3']},GAME)
+
     def test_previous_mvc2_input_profiles_remain_replayable(self):
         old={'profile_sha256':next(iter(GAME.previous_input_profiles)),
              'steps':[{'frames':1,'buttons':['D','F','HP']}]}
@@ -143,6 +171,16 @@ class FlycastScoringTests(unittest.TestCase):
 
 
 class FlycastSessionTests(unittest.TestCase):
+    def test_button_selection_persists_without_changing_other_rules(self):
+        with tempfile.TemporaryDirectory() as directory:
+            app=Dashboard(Path(directory))
+            saved=app.save({'game':GAME.id,'emulator':'flycast.exe','snapshot':'mvsc2.state',
+                            'rules':{**RULES,'budget':5000,'disabled_buttons':['A1','A2']}})
+            profile=Dashboard(Path(directory)).profile(GAME.id)
+            self.assertEqual(saved['rules']['disabled_buttons'],['A1','A2'])
+            self.assertEqual(profile['rules']['disabled_buttons'],['A1','A2'])
+            self.assertEqual(profile['rules']['budget'],5000)
+
     def test_existing_all_groups_profile_exposes_assists_and_supers(self):
         with tempfile.TemporaryDirectory() as directory:
             app=Dashboard(Path(directory))

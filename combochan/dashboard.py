@@ -23,7 +23,8 @@ from .moves import validate_custom_moves
 ROOT=Path(__file__).resolve().parents[1]
 DEFAULT_RULES={'resources':'state','stock_cap':0,'true_combo':True,'policy':'heuristic',
                'budget':600,'depth':5,'beam':8,'seed':0,'delays':[0,2,4,6,8,12,16],
-               'custom_moves':[],'disabled_actions':[],'auto_timing':True,'max_delay':60,'max_start_delay':0,
+               'custom_moves':[],'disabled_actions':[],'disabled_buttons':[],
+               'auto_timing':True,'max_delay':60,'max_start_delay':0,
                'max_frames':180,'tail':90,'groups':['normals','motions','movement']}
 BUSY={'starting','checking','model','searching','validating','replaying','stopping'}
 
@@ -51,6 +52,9 @@ def validate_rules(data,game):
     names={a.name for a in game.actions([g['id'] for g in game.groups])}
     if not isinstance(disabled,list) or any(not isinstance(n,str) or n not in names for n in disabled):
         raise ValueError('Unknown disabled move.')
+    disabled_buttons=rules['disabled_buttons']
+    if not isinstance(disabled_buttons,list) or any(not isinstance(button,str) or button not in game.search_buttons for button in disabled_buttons) or len(disabled_buttons)!=len(set(disabled_buttons)):
+        raise ValueError('Unknown or duplicate disabled button.')
     if not game.search_actions(rules): raise ValueError('Enable at least one built-in or custom move.')
     if hasattr(game,'validate_rules'): game.validate_rules(rules)
     return {k:rules[k] for k in DEFAULT_RULES}

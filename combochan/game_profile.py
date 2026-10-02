@@ -107,6 +107,7 @@ class ConfiguredGame(VampireSavior):
 
     def __init__(self, profile):
         self.definition = validate_profile(profile)
+        self.search_buttons=tuple(code for code in self.definition['inputs'] if code not in DIRECTIONS)
         for key in ('id', 'title', 'rom'):
             setattr(self, key, self.definition[key])
         self.profile_sha256 = hashlib.sha256(json.dumps(self.definition, sort_keys=True).encode()).hexdigest()

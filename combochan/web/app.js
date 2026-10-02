@@ -3,7 +3,7 @@ const $ = id => document.getElementById(id);
 const busyStages = new Set(['starting','checking','model','searching','validating','replaying','stopping']);
 let token = '', currentGame = '', state = null, dirty = false, pending = false, initialized = false, offline = false;
 let resultTab='all', clearedResults=[];
-const defaults = {resources:'state',stock_cap:0,true_combo:true,policy:'heuristic',budget:600,depth:5,beam:8,seed:0,delays:[0,2,4,6,8,12,16],max_frames:180,tail:90,groups:['normals','motions','movement'],custom_moves:[],disabled_actions:[],auto_timing:true,max_delay:60,max_start_delay:0};
+const defaults = {resources:'state',stock_cap:0,true_combo:true,policy:'heuristic',budget:600,depth:5,beam:8,seed:0,delays:[0,2,4,6,8,12,16],max_frames:180,tail:90,groups:['normals','motions','movement'],custom_moves:[],disabled_actions:[],disabled_buttons:[],auto_timing:true,max_delay:60,max_start_delay:0};
 const fieldMap = {'stock_cap':'stock-cap','true_combo':'true-combo','max_frames':'max-frames','auto_timing':'auto-timing','max_delay':'max-delay','max_start_delay':'max-start-delay'};
 function notice(message, success=false) { $('notice-text').textContent=message; $('notice').hidden=false; $('notice').classList.toggle('success',success); }
 function hideNotice() { $('notice').hidden=true; }
@@ -23,6 +23,7 @@ function loadRules(rules) {
   for (const [key,value] of Object.entries(rules)) {
     if(key==='custom_moves') { renderCustomMoves(value); continue; }
     if(key==='disabled_actions') { document.querySelectorAll('[data-move]').forEach(input=>input.checked=!value.includes(input.dataset.move)); continue; }
+    if(key==='disabled_buttons') { document.querySelectorAll('[data-search-button]').forEach(input=>input.checked=!value.includes(input.dataset.searchButton)); continue; }
     if(key==='groups') { document.querySelectorAll('[data-group]').forEach(input=>input.checked=value.includes(input.dataset.group)); continue; }
     const input=$(fieldMap[key] || key); if(!input) continue;
     if(input.type==='checkbox') input.checked=value; else input.value=Array.isArray(value)?value.join(', '):value;
@@ -34,6 +35,7 @@ function readRules() {
   for(const key of Object.keys(defaults)) {
     if(key==='custom_moves') result.custom_moves=[...document.querySelectorAll('.custom-move')].map(row=>({name:row.querySelector('[data-name]').value,sequence:row.querySelector('[data-sequence]').value,enabled:row.querySelector('[data-enabled]').checked}));
     else if(key==='disabled_actions') result.disabled_actions=[...document.querySelectorAll('[data-move]:not(:checked)')].map(input=>input.dataset.move);
+    else if(key==='disabled_buttons') result.disabled_buttons=[...document.querySelectorAll('[data-search-button]:not(:checked)')].map(input=>input.dataset.searchButton);
     else if(key==='groups') result.groups=[...document.querySelectorAll('[data-group]:checked')].map(input=>input.dataset.group);
     else if(key==='delays') {
       const text=$('delays').value.trim();
@@ -74,6 +76,11 @@ function chooseGame(id) {
   $('input-groups').replaceChildren(...game.groups.map(group=>{
     const label=el('label',undefined,'group-option'), input=el('input'); input.type='checkbox'; input.dataset.group=group.id;
     input.addEventListener('change',markDirty); label.append(input,document.createTextNode(group.label)); return label;
+  }));
+  $('button-controls').hidden=!(game.buttons||[]).length;
+  $('search-buttons').replaceChildren(...(game.buttons||[]).map(button=>{
+    const label=el('label',undefined,'group-option'),input=el('input');input.type='checkbox';input.dataset.searchButton=button;
+    input.addEventListener('change',markDirty);label.append(input,document.createTextNode(button));return label;
   }));
   $('built-in-moves').replaceChildren(...(game.moves||[]).map(move=>{
     const label=el('label',undefined,'group-option'),input=el('input');input.type='checkbox';input.dataset.move=move.name;input.dataset.moveGroup=move.group;

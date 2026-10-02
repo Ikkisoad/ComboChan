@@ -41,11 +41,13 @@ class MarvelVsCapcom2:
         {'id': 'assists', 'label': 'Partner assists'},
         {'id': 'supers', 'label': 'Hyper combos'},
     )
+    search_buttons = ('LP','LK','HP','HK','A1','A2')
 
     def public(self):
         return {'id': self.id, 'title': self.title, 'subtitle': self.subtitle,
                 'rom': self.rom, 'badge': 'M2', 'emulator': self.emulator_name,
                 'groups': self.groups, 'player': 'Player 1', 'combo_validated': False,
+                'buttons': self.search_buttons,
                 'state_extensions': self.state_extensions,
                 'status': 'Experimental escape checks',
                 'moves': [{'name': a.name, 'group': a.group} for a in self.actions([g['id'] for g in self.groups])],
@@ -91,11 +93,12 @@ class MarvelVsCapcom2:
         return actions
 
     def search_actions(self, rules):
-        from .games import Action
+        from .games import Action, filter_disabled_buttons
         from .moves import parse_sequence
         custom = [Action(m['name'], parse_sequence(m['sequence']), 'custom')
                   for m in rules.get('custom_moves', []) if m['enabled']]
-        return custom + [a for a in self.actions(rules['groups']) if a.name not in rules.get('disabled_actions', [])]
+        actions=custom + [a for a in self.actions(rules['groups']) if a.name not in rules.get('disabled_actions', [])]
+        return filter_disabled_buttons(actions,rules)
 
     def validate_rules(self, rules):
         if rules['true_combo']:
@@ -173,7 +176,7 @@ class MarvelVsCapcom2:
         selected=[]
         # Keep a launcher and an airborne setup even if a grounded special did
         # more immediate damage. Remaining slots still rank by measured damage.
-        for predicate in (lambda c:c.get('airborne_observed'),
+        for predicate in (lambda c:c.get('airborne_observed') and c.get('last') not in ('236PP','214PP','236KK'),
                           lambda c:c.get('launch_observed') and not c.get('airborne_observed')):
             options=[c for c in survivors if predicate(c) and all(c is not x for x in selected)]
             if options and len(selected)<width:

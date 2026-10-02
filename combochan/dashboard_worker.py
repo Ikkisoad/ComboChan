@@ -109,6 +109,25 @@ def select_frontier(survivors, width):
     return chosen
 
 
+def reserve_finisher_trial(candidates, pools, frontier, finishers, quota):
+    """Try a strong starter again after a developing prefix within each depth budget."""
+    if quota < 2 or not finishers:
+        return candidates
+    parents=sorted(range(len(frontier)),key=lambda i:(
+        -frontier[i]['score']['damage'],-len(frontier[i].get('action_names',[]))))
+    for i in parents:
+        parent=frontier[i]
+        names=parent.get('action_names',[])
+        if not names or parent['score']['damage']<=0 or any(name in finishers for name in names):
+            continue
+        finisher=next((c for c in pools[i] if c['last'] in finishers),None)
+        if finisher is not None:
+            candidates.remove(finisher)
+            candidates.insert(1,finisher)
+            break
+    return candidates
+
+
 def execute(config, emit_event=emit):
     if 'game_profile' in config:
         from .game_profile import ConfiguredGame
@@ -167,6 +186,7 @@ def execute(config, emit_event=emit):
     actions=game.search_actions(rules)
     frontier=[{'steps':(), 'notation':'', 'score':{'damage':0},'state':initial,'landing_delays':game.landing_delays(records[0]['trace'],0,rules.get('max_delay',60))}]
     best=None
+    finishers=set()
     finalists=[]
     completed=0
     simulator_frames=0
@@ -174,11 +194,13 @@ def execute(config, emit_event=emit):
     for depth in range(1,rules['depth']+1):
         check_cancel()
         pools=[]
+        pool_parents=[]
         for parent in frontier:
             candidates=continuation_candidates(parent,actions,rules,getattr(game,"vsav_ordering",True))
             if hasattr(game,'order_continuations'):
                 candidates=game.order_continuations(candidates,parent,rules)
             if candidates:
+                pool_parents.append(parent)
                 if rules['policy']=='laya':
                     pools.append(candidates)
                 else:
@@ -188,6 +210,8 @@ def execute(config, emit_event=emit):
         candidates=[pool[i] for i in range(max(map(len,pools))) for pool in pools if i<len(pool)]
         remaining=rules['budget']-completed
         quota=depth_quota(remaining,rules['depth']-depth+1,len(candidates))
+        if rules['policy']=='heuristic':
+            candidates=reserve_finisher_trial(candidates,pools,pool_parents,finishers,quota)
         survivors=[]
         offset=0
         while offset<quota and candidates:
@@ -258,6 +282,8 @@ def execute(config, emit_event=emit):
                 completed+=1
                 simulator_frames+=score['frames']
                 if score['candidate_valid']:
+                    if depth==1 and score['damage']>0 and (not finishers or score['damage']>=best['score']['damage']):
+                        finishers={candidate['last']}
                     finalists.append(candidate)
                     finalists.sort(key=lambda c:(-c['score']['damage'],sum(s.frames for s in c['steps'])))
                     finalists=finalists[:8]

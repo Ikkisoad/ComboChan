@@ -16,6 +16,11 @@ class Action:
     group: str
 
 
+def filter_disabled_buttons(actions, rules):
+    disabled=set(rules.get('disabled_buttons', ()))
+    return [action for action in actions if not any(disabled.intersection(step.buttons) for step in action.steps)]
+
+
 class VampireSavior:
     id = 'vampire-savior'
     title = 'Vampire Savior'
@@ -31,12 +36,13 @@ class VampireSavior:
         {'id': 'motions', 'label': 'Motion inputs & two-button variants'},
         {'id': 'movement', 'label': 'Walk, jump & dash inputs'},
     )
+    search_buttons = ('LP','LK','MP','MK','HP','HK')
 
     def public(self):
         return {'id': self.id, 'title': self.title, 'subtitle': self.subtitle,
                 'moves':[{'name':a.name,'group':a.group} for a in self.actions([g['id'] for g in self.groups])],
                 'rom': self.rom, 'badge':self.badge, 'emulator': self.emulator_name, 'groups': self.groups,
-                'status': 'Experimental adapter', 'player': 'Player 1',
+                'status': 'Experimental adapter', 'player': 'Player 1', 'buttons': self.search_buttons,
                 'limits': 'Japan ROM (vsavj). Searches selected input templates; not every possible input sequence. Character-specific specials, charges and air routes are not exhaustive.'}
 
     def actions(self, groups):
@@ -65,7 +71,8 @@ class VampireSavior:
 
     def search_actions(self, rules):
         custom=[Action(m['name'],parse_sequence(m['sequence']),'custom') for m in rules.get('custom_moves',[]) if m['enabled']]
-        return custom+[a for a in self.actions(rules['groups']) if a.name not in rules.get('disabled_actions',[])]
+        actions=custom+[a for a in self.actions(rules['groups']) if a.name not in rules.get('disabled_actions',[])]
+        return filter_disabled_buttons(actions,rules)
 
     def validate_rules(self, rules):
         if any(set(step.buttons) & {'A1','A2'} for action in self.search_actions(rules) for step in action.steps):
