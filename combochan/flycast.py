@@ -50,7 +50,7 @@ class MarvelVsCapcom2:
                 'buttons': self.search_buttons,
                 'state_extensions': self.state_extensions,
                 'status': 'Experimental escape checks',
-                'moves': [{'name': a.name, 'group': a.group} for a in self.actions([g['id'] for g in self.groups])],
+                'moves': [{'name': a.name, 'group': a.group, 'buttons': sorted({b for step in a.steps for b in step.buttons})} for a in self.actions([g['id'] for g in self.groups])],
                 'limits': 'Naomi mvsc2. A1/A2 call the selected partner assists; 236PP, 214PP and 236KK cover SonSon’s hypers. SonSon launcher and aerial continuations are prioritized when she is P1. Finalists face guard and jump attempts after the first hit. Hitstun is uncalibrated. Runs at normal speed.',
                 'connection_steps': ['Prepare a session, then use Launch emulator to open its isolated Flycast copy.',
                                      'The copied save state loads automatically. Keep that window running with menus closed.',

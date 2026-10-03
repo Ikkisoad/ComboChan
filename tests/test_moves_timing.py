@@ -11,6 +11,25 @@ from combochan.games import get_game
 from combochan.moves import parse_sequence
 
 class MovesAndTimingTests(unittest.TestCase):
+    def test_selected_starter_only_restricts_first_action(self):
+        game=get_game('vampire-savior')
+        for starter in ('c.LK','Opening'):
+            rules=validate_rules({'starter':starter,'max_start_delay':3,
+                'custom_moves':[{'name':'Opening','sequence':'LP, N, HP','enabled':True}]},game)
+            actions=game.search_actions(rules)
+            candidates=continuation_candidates({'steps':(),'notation':''},actions,rules)
+            self.assertEqual({c['last'] for c in candidates},{starter})
+            self.assertEqual({c['delay'] for c in candidates},set(range(4)))
+            parent={**candidates[0],'state':{'p1':{'y':40}}}
+            followups=continuation_candidates(parent,actions,rules)
+            self.assertTrue(any(c['last']!=starter for c in followups))
+        for change in ({'starter':'missing'},{'starter':None},
+                       {'starter':'LP','disabled_actions':['LP']},
+                       {'starter':'LP','disabled_buttons':['LP']},
+                       {'starter':'236LP','groups':['normals']}):
+            with self.assertRaises(ValueError): validate_rules(change,game)
+        self.assertEqual(validate_rules({},game)['starter'],'')
+
     def test_demon_sequence_has_distinct_taps(self):
         steps=parse_sequence('LP, N, LP, F, LK, HP')
         self.assertEqual(steps,(Step(1,('LP',)),Step(1),Step(1,('LP',)),Step(1,('F',)),Step(1,('LK',)),Step(1,('HP',))))

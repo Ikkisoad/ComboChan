@@ -40,7 +40,7 @@ class VampireSavior:
 
     def public(self):
         return {'id': self.id, 'title': self.title, 'subtitle': self.subtitle,
-                'moves':[{'name':a.name,'group':a.group} for a in self.actions([g['id'] for g in self.groups])],
+                'moves':[{'name':a.name,'group':a.group,'buttons':sorted({b for step in a.steps for b in step.buttons})} for a in self.actions([g['id'] for g in self.groups])],
                 'rom': self.rom, 'badge':self.badge, 'emulator': self.emulator_name, 'groups': self.groups,
                 'status': 'Experimental adapter', 'player': 'Player 1', 'buttons': self.search_buttons,
                 'limits': 'Japan ROM (vsavj). Searches selected input templates; not every possible input sequence. Character-specific specials, charges and air routes are not exhaustive.'}

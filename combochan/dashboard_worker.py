@@ -42,6 +42,8 @@ def timing_options(parent, rules):
 
 def continuation_candidates(parent,actions,rules,vsav_ordering=True):
     actions=list(actions)
+    if not parent['steps'] and rules.get('starter'):
+        actions=[action for action in actions if action.name==rules['starter']]
     if parent['steps'] and vsav_ordering:
         previous=parent.get('last','')
         buttons=['LP','LK','MP','MK','HP','HK']

@@ -3,7 +3,7 @@ const $ = id => document.getElementById(id);
 const busyStages = new Set(['starting','checking','model','searching','validating','replaying','stopping']);
 let token = '', currentGame = '', state = null, dirty = false, pending = false, initialized = false, offline = false;
 let resultTab='all', clearedResults=[];
-const defaults = {resources:'state',stock_cap:0,true_combo:true,policy:'heuristic',budget:600,depth:5,beam:8,seed:0,delays:[0,2,4,6,8,12,16],max_frames:180,tail:90,groups:['normals','motions','movement'],custom_moves:[],disabled_actions:[],disabled_buttons:[],auto_timing:true,max_delay:60,max_start_delay:0};
+const defaults = {resources:'state',stock_cap:0,true_combo:true,policy:'heuristic',budget:600,depth:5,beam:8,seed:0,delays:[0,2,4,6,8,12,16],max_frames:180,tail:90,groups:['normals','motions','movement'],custom_moves:[],disabled_actions:[],disabled_buttons:[],starter:'',auto_timing:true,max_delay:60,max_start_delay:0};
 const fieldMap = {'stock_cap':'stock-cap','true_combo':'true-combo','max_frames':'max-frames','auto_timing':'auto-timing','max_delay':'max-delay','max_start_delay':'max-start-delay'};
 function notice(message, success=false) { $('notice-text').textContent=message; $('notice').hidden=false; $('notice').classList.toggle('success',success); }
 function hideNotice() { $('notice').hidden=true; }
@@ -18,7 +18,7 @@ async function api(path, data, retry=true) {
   return result;
 }
 function el(tag,text,className) { const node=document.createElement(tag); if(text!==undefined) node.textContent=text; if(className) node.className=className; return node; }
-function markDirty() { dirty=true; $('save-state').textContent='Unsaved changes'; renderControls(); }
+function markDirty() { refreshStarter(); dirty=true; $('save-state').textContent='Unsaved changes'; renderControls(); }
 function loadRules(rules) {
   for (const [key,value] of Object.entries(rules)) {
     if(key==='custom_moves') { renderCustomMoves(value); continue; }
@@ -28,7 +28,25 @@ function loadRules(rules) {
     const input=$(fieldMap[key] || key); if(!input) continue;
     if(input.type==='checkbox') input.checked=value; else input.value=Array.isArray(value)?value.join(', '):value;
   }
+  refreshStarter(rules.starter || '');
   $('cap-field').hidden=$('resources').value!=='cap';
+}
+function refreshStarter(selected=$('starter').value) {
+  const game=state?.games.find(game=>game.id===currentGame);
+  if(!game) return;
+  const groups=new Set([...document.querySelectorAll('[data-group]:checked')].map(input=>input.dataset.group));
+  const disabled=new Set([...document.querySelectorAll('[data-move]:not(:checked)')].map(input=>input.dataset.move));
+  const disabledButtons=new Set([...document.querySelectorAll('[data-search-button]:not(:checked)')].map(input=>input.dataset.searchButton));
+  const names=(game.moves||[]).filter(move=>groups.has(move.group)&&!disabled.has(move.name)&&!(move.buttons||[]).some(button=>disabledButtons.has(button))).map(move=>move.name);
+  document.querySelectorAll('.custom-move').forEach(row=>{
+    const name=row.querySelector('[data-name]').value.trim();
+    const buttons=row.querySelector('[data-sequence]').value.toUpperCase().split(',').flatMap(step=>step.split(':')[0].split('+').map(button=>button.trim()));
+    if(name&&row.querySelector('[data-enabled]').checked&&!buttons.some(button=>disabledButtons.has(button))) names.push(name);
+  });
+  const option=(name,label=name)=>{const node=el('option',label);node.value=name;return node};
+  const options=[option('','Any enabled move'),...[...new Set(names)].map(name=>option(name))];
+  if(selected&&!names.includes(selected)) options.push(option(selected,selected+' (unavailable — enable or choose another move)'));
+  $('starter').replaceChildren(...options);$('starter').value=selected;
 }
 function readRules() {
   const result={};
