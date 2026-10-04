@@ -18,12 +18,12 @@ import uuid
 import webbrowser
 
 from .games import GAMES, get_game
-from .moves import validate_custom_moves
+from .moves import parse_starter, validate_custom_moves
 
 ROOT=Path(__file__).resolve().parents[1]
 DEFAULT_RULES={'resources':'state','stock_cap':0,'true_combo':True,'policy':'heuristic',
                'budget':600,'depth':5,'beam':8,'seed':0,'delays':[0,2,4,6,8,12,16],
-               'custom_moves':[],'disabled_actions':[],'disabled_buttons':[],'starter':'',
+               'custom_moves':[],'disabled_actions':[],'disabled_buttons':[],'starter':'','starters':[],
                'auto_timing':True,'max_delay':60,'max_start_delay':0,
                'max_frames':180,'tail':90,'groups':['normals','motions','movement']}
 BUSY={'starting','checking','model','searching','validating','replaying','stopping'}
@@ -56,8 +56,16 @@ def validate_rules(data,game):
     if not isinstance(disabled_buttons,list) or any(not isinstance(button,str) or button not in game.search_buttons for button in disabled_buttons) or len(disabled_buttons)!=len(set(disabled_buttons)):
         raise ValueError('Unknown or duplicate disabled button.')
     if not game.search_actions(rules): raise ValueError('Enable at least one built-in or custom move.')
-    if not isinstance(rules['starter'],str) or (rules['starter'] and rules['starter'] not in {a.name for a in game.search_actions(rules)}):
-        raise ValueError('Select an enabled move as the search starter.')
+    if not isinstance(rules['starter'],str): raise ValueError('Enter a starter string.')
+    if not isinstance(rules['starters'],list) or len(rules['starters'])>32 or any(not isinstance(name,str) for name in rules['starters']):
+        raise ValueError('Enter at most 32 starter strings separated by semicolons.')
+    # Keep old single-starter profiles working and store one canonical selection.
+    rules['starters']=list(dict.fromkeys(name.strip() for name in (rules['starters'] or ([rules['starter']] if rules['starter'] else []))))
+    for starter in rules['starters']:
+        sequence=parse_starter(starter,game.search_actions(rules))
+        if len(sequence)>rules['depth']:
+            raise ValueError(f'Starter "{starter}" needs {len(sequence)} actions. Increase Maximum actions to at least {len(sequence)}.')
+    rules['starter']=rules['starters'][0] if len(rules['starters'])==1 else ''
     if hasattr(game,'validate_rules'): game.validate_rules(rules)
     return {k:rules[k] for k in DEFAULT_RULES}
 
@@ -187,7 +195,7 @@ class Dashboard:
             if not result.get('best'): continue
             best=result['best']
             items.append({'id':id,'favorite':bool(flags.get('favorite')),'game':result.get('game','vampire-savior'),'created':path.stat().st_mtime,
-                'snapshot_source':result.get('snapshot_source',''),'damage':best.get('damage',0),'notation':best.get('notation',best.get('label','Saved route')),
+                'snapshot_source':result.get('snapshot_source',''),'starter':result.get('starter',result.get('rules',{}).get('starter','')),'damage':best.get('damage',0),'notation':best.get('notation',best.get('label','Saved route')),
                 'verified':best.get('verified',False),'escape_checked':best.get('escape_checked',False),
                 'damage_only':result.get('game')=='marvel-vs-capcom-2',
                 'failed_validation':best.get('reproduced') is False,'policy':result.get('rules',{}).get('policy',result.get('policy','heuristic')),
@@ -303,7 +311,11 @@ class Dashboard:
             self.owned_emulators=[p for p in self.owned_emulators if p.poll() is None]
             if self.owned_emulators: raise ValueError('The dashboard already opened an emulator. Load the session script there or close it before launching another.')
             arguments=game.launch_arguments(exe,session/'connect.lua')
-            process=subprocess.Popen(arguments,cwd=Path(arguments[0]).parent)
+            if os.name == 'nt':
+                from .windows_launch import launch_visible
+                process=launch_visible(arguments,Path(arguments[0]).parent)
+            else:
+                process=subprocess.Popen(arguments,cwd=Path(arguments[0]).parent)
             self.owned_emulators.append(process)
             return {'message':getattr(game,'launch_message','Emulator launched. If it does not connect, load the prepared Lua script using the instructions below.')}
 
@@ -374,7 +386,7 @@ class Dashboard:
         with self.lock:
             if self.job['stage'] not in BUSY: return {'message':'No active job.'}
             (Path(self.job['session'])/'cancel.flag').write_text('stop',encoding='ascii')
-            self.job.update(stage='stopping',message='Stopping after the active batch; remaining queued states will not run. Keep the emulator running until it finishes.')
+            self.job.update(stage='stopping',message='Stopping after the active batch; remaining queued searches will not run. Keep the emulator running until it finishes.')
             return {'message':self.job['message']}
 
 

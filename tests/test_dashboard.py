@@ -73,6 +73,15 @@ class DashboardTests(unittest.TestCase):
         self.app.prepare(self.data)
         with self.assertRaises(ValueError): self.app.start({'game':'vampire-savior','action':'search'})
 
+    def test_windows_emulator_launch_requests_visible_window(self):
+        self.app.prepare(self.data)
+        with patch('combochan.dashboard.os.name', 'nt'), \
+             patch('combochan.windows_launch.launch_visible') as launch:
+            self.app.launch('vampire-savior')
+        self.assertEqual(launch.call_args.args[0][0], str(self.exe))
+        self.assertEqual(launch.call_args.args[1], self.exe.parent)
+        self.assertIs(self.app.owned_emulators[0], launch.return_value)
+
     def test_stop_is_cooperative(self):
         self.app.prepare(self.data); session=self.app.session('vampire-savior')
         self.app.job={'stage':'searching','session':str(session)}

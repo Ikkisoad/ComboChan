@@ -1,5 +1,32 @@
 """Data-only custom move notation; no executable scripts."""
+import re
 from .bridge import Step
+
+
+def parse_starter(text, actions):
+    """Resolve a compact move prefix against the enabled move library."""
+    if not isinstance(text,str) or not text.strip() or len(text)>640:
+        raise ValueError('Enter a starter such as 2LK2LK or 2HP (at most 640 characters).')
+    names={}
+    for action in actions:
+        names.setdefault(action.name.casefold(),action.name)
+    # Exact library/custom names take precedence over shorthand aliases.
+    for button in ('LP','LK','MP','MK','HP','HK'):
+        for shorthand,name in (('2'+button,'c.'+button),('5'+button,button),('3'+button,'df.'+button)):
+            if name.casefold() in names: names.setdefault(shorthand.casefold(),names[name.casefold()])
+    tokens=sorted(names,key=len,reverse=True)
+    result=[]
+    for part in re.split(r'\s*[,>]\s*',text.strip().casefold()):
+        remaining=part.strip()
+        if not remaining: raise ValueError('Empty move in starter. Use 2LK2LK or 2LK > 2LK.')
+        while remaining:
+            token=next((token for token in tokens if remaining.startswith(token)),None)
+            if token is None:
+                raise ValueError(f'Unknown or disabled move in starter "{text}": "{remaining}". Use enabled move names or shorthand such as 2LK2LK.')
+            result.append(names[token])
+            if len(result)>8: raise ValueError('A starter may contain at most 8 moves.')
+            remaining=remaining[len(token):].lstrip()
+    return result
 
 
 def parse_sequence(text):

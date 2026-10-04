@@ -118,7 +118,67 @@ class VampireSavior:
 
 from .flycast import MarvelVsCapcom2
 
-GAMES = {game.id: game for game in (VampireSavior(), MarvelVsCapcom2())}
+class ThirdStrike(VampireSavior):
+    id = 'street-fighter-iii-third-strike'
+    title = 'Street Fighter III: 3rd Strike'
+    subtitle = 'Fight for the Future'
+    rom = 'sfiii3nr1'
+    badge = '3S'
+    vsav_ordering = False
+    combo_validated = False
+    default_snapshot = 'G:/Games/Fightcade/emulator/fbneo/savestates/sfiii3nr1 slot 01.fs'
+
+    def __init__(self):
+        import hashlib
+        import json
+        inputs = {code: {p: p.upper()+' '+name for p in ('p1','p2')}
+                  for code, name in [('U','Up'),('D','Down'),('L','Left'),('R','Right'),
+                                     ('LP','Weak Punch'),('MP','Medium Punch'),('HP','Strong Punch'),
+                                     ('LK','Weak Kick'),('MK','Medium Kick'),('HK','Strong Kick')]}
+        players = {}
+        # CPS3 player bases and health from FBNeo training-mode/hitbox maps.
+        # Hitstun is distinct from the stun gauge and displayed combo counter.
+        for p, base, stocks, meter, hitstun in (
+                ('p1',0x02068C6C,0x020695BE,0x020695B5,0x020288A8),
+                ('p2',0x02069104,0x020695EB,0x020695E1,0x020288A9)):
+            players[p] = {name: {'address': address, 'type': kind} for name,address,kind in (
+                ('health',base+0x9F,'u8'),('x',base+0x64,'s16'),('y',base+0x68,'s16'),
+                ('stocks',stocks,'u8'),('meter',meter,'u8'),('stun1',hitstun,'u8'))}
+        self.telemetry = {'rom': self.rom, 'inputs': inputs, 'players': players}
+        self.profile_sha256 = hashlib.sha256(json.dumps(self.telemetry,sort_keys=True).encode()).hexdigest()
+
+    def public(self):
+        value = super().public()
+        value.update(combo_validated=self.combo_validated,
+                     limits='Japan 990512 NO CD (sfiii3nr1). Experimental damage searches; true-combo verification requires live calibration. Generic normals, motions and movement; add character-specific moves as custom inputs.')
+        return value
+
+    def validate_initial(self, state):
+        if not all(0 <= state[p]['health'] <= 160 for p in ('p1','p2')):
+            raise ValueError('Third Strike health telemetry is outside 0-160.')
+
+    def validate_rules(self, rules):
+        super().validate_rules(rules)
+        if rules['true_combo'] and not self.combo_validated:
+            raise ValueError('Third Strike true-combo verification requires live hitstun and defensive calibration; disable Require a true combo.')
+        if rules['resources'] == 'cap':
+            raise ValueError('Third Strike EX moves spend partial meter; stock caps are not supported. Use save-state resources.')
+
+    def landing_delays(self, trace, end_frame, limit):
+        return []
+
+    def score(self, record, rules):
+        self.validate_rules(rules)
+        for row in record['trace']:
+            self.validate_initial(row)
+        return super().score(record, rules)
+
+    def session_script(self):
+        from .game_profile import lua_value
+        return 'COMBOCHAN_GAME = '+lua_value({**self.telemetry,'sha256':self.profile_sha256})+'\n'
+
+
+GAMES = {game.id: game for game in (VampireSavior(), MarvelVsCapcom2(), ThirdStrike())}
 
 
 def get_game(game_id):

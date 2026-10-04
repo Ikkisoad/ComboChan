@@ -84,6 +84,89 @@ class QueueTests(unittest.TestCase):
         self.assertTrue((self.session/'verify.json').exists())
         self.assertTrue((self.session/'state_2.fs.verify.json').exists())
 
+    def test_each_starter_runs_independently_for_each_state(self):
+        self.config['rules']={**self.config['rules'],'starters':['c.LK','c.HP'],'depth':2}
+        events,selected=self.run_queue()
+        self.assertEqual(selected,['root.fs','root.fs','state_2.fs','state_2.fs'])
+        results=[e for e in events if 'result' in e]
+        self.assertEqual([e['queue_index'] for e in results],[1,2,3,4])
+        self.assertEqual([e['queue_total'] for e in results],[4]*4)
+        self.assertEqual([e['state_index'] for e in results],[1,1,2,2])
+        self.assertEqual([e['starter'] for e in results],['c.LK','c.HP']*2)
+        for event in results:
+            result=event['result']
+            self.assertEqual(result['evaluated'],24)
+            self.assertEqual(result['rules']['starters'],[event['starter']])
+            self.assertEqual(result['rules']['budget'],24)
+            self.assertTrue(result['best']['verified'])
+            self.assertTrue(result['best']['notation'].startswith(event['starter']))
+        self.app.job={'id':'starters','stage':'starting','logs':[]}
+        process=Mock(stdout=io.StringIO('\n'.join(json.dumps(e) for e in events)),wait=lambda:0)
+        self.app.watch(process,'starters')
+        self.assertEqual(set(self.app.result_files()),{'starters-1','starters-2','starters-3','starters-4'})
+        self.assertEqual([r['starter'] for r in self.app.history()].count('c.LK'),2)
+
+    def test_multiple_starters_work_without_snapshot_queue(self):
+        config={**self.config,'rules':{**self.config['rules'],'starters':['c.LK','c.HP']}}
+        config.pop('snapshots')
+        events=[]
+        with patch('combochan.dashboard_worker.Bridge',SimulatedBridge):
+            execute_queue(config,lambda **e:events.append(e))
+        self.assertEqual([e['result']['starter'] for e in events if 'result' in e],['c.LK','c.HP'])
+
+    def test_sequence_starters_keep_complete_prefixes_in_separate_results(self):
+        self.config['rules']={**self.config['rules'],'starters':['2LK2LK','2HP'],'depth':3}
+        events,selected=self.run_queue()
+        results=[e['result'] for e in events if 'result' in e]
+        self.assertEqual([r['starter'] for r in results],['2LK2LK','2HP']*2)
+        for result in results:
+            route=result['best']
+            if result['starter']=='2LK2LK':
+                self.assertEqual(route['notation'].count('c.LK'),2)
+                self.assertEqual([s['buttons'] for s in route['steps'] if s['buttons']],[('D','LK'),('D','LK')])
+                self.assertTrue(any(not s['buttons'] and s['frames']>=1 for s in route['steps']))
+            else:self.assertTrue(route['notation'].startswith('c.HP'))
+
+    def test_incomplete_prefix_cannot_be_saved_as_best(self):
+        class BrokenPrefixBridge(SimulatedBridge):
+            def run(self,trials,speed='turbo'):
+                records,manifest=super().run(trials,speed)
+                for record in records:
+                    if record['id'].startswith('d2_'):
+                        for row in record['trace']:row['p2']['health']=288
+                return records,manifest
+        config={**self.config,'rules':{**self.config['rules'],'starters':['2LK2LK'],'depth':2}}
+        events=[]
+        with patch('combochan.dashboard_worker.Bridge',BrokenPrefixBridge):
+            execute_queue(config,lambda **e:events.append(e))
+        self.assertTrue(all(e['result']['best'] is None for e in events if 'result' in e))
+
+    def test_starter_selections_persist_and_checks_do_not_repeat_for_each_starter(self):
+        self.app.save({**self.data,'rules':{**self.data['rules'],'starters':['c.LK','c.HP']}})
+        self.assertEqual(Dashboard(self.root).profile('vampire-savior')['rules']['starters'],['c.LK','c.HP'])
+        self.config['rules']=self.app.profile('vampire-savior')['rules']
+        events,selected=self.run_queue('check')
+        self.assertEqual(selected,['root.fs','state_2.fs'])
+        self.assertEqual(sum('result' in e for e in events),2)
+
+    def test_stop_between_starters_keeps_first_result_and_skips_rest(self):
+        calls=[];events=[]
+        config={**self.config,'rules':{**self.config['rules'],'starters':['c.LK','c.HP']}}
+        def execute(config,emit):
+            calls.append(config['rules']['starter'])
+            emit(stage='complete',result={'best':None})
+            (self.session/'cancel.flag').write_text('stop')
+        with patch('combochan.dashboard_worker.execute',side_effect=execute):
+            with self.assertRaises(Cancelled):execute_queue(config,lambda **e:events.append(e))
+        self.assertEqual(calls,['c.LK'])
+        self.assertEqual(len([e for e in events if 'result' in e]),1)
+
+    def test_failure_does_not_start_next_starter(self):
+        config={**self.config,'rules':{**self.config['rules'],'starters':['c.LK','c.HP']}}
+        with patch('combochan.dashboard_worker.execute',side_effect=RuntimeError('emulator failed')) as execute:
+            with self.assertRaisesRegex(RuntimeError,'emulator failed'):execute_queue(config,lambda **e:None)
+        self.assertEqual(execute.call_count,1)
+
     def test_stop_between_states_does_not_start_next(self):
         calls=[]
         def execute(config,emit):
@@ -114,6 +197,7 @@ class QueueTests(unittest.TestCase):
         self.assertEqual({r['snapshot_source'] for r in self.app.history()},set(self.data['snapshots']))
 
     def test_replay_selects_matching_queued_state_only(self):
+        self.app.save({**self.data,'rules':{**self.data['rules'],'starters':['c.LK','c.HP']}})
         atomic_json(self.app.data/'runs/saved.json',{'game':'vampire-savior','best':{'snapshot_sha256':self.prepared[1]['snapshot_sha256']}})
         with patch('combochan.dashboard.subprocess.Popen'),patch('combochan.dashboard.threading.Thread'):
             run=self.app.start({'game':'vampire-savior','action':'replay','result_id':'saved'})

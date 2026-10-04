@@ -6,6 +6,8 @@ The dashboard also includes an experimental **Marvel vs. Capcom 2 (Naomi) / Flyc
 
 The dashboard searches normals, motion inputs, and movement templates for P1 against P2. It uses the resources available in the save state by default, with an optional stock-spending cap. Results mean **best found in the configured search**, not globally optimal combos. Character-specific move coverage remains incomplete. Other compatible FBNeo games can use manually configured JSON profiles. The original CLI search retains its narrower meterless normal-attack scope.
 
+The dashboard includes **Street Fighter III: 3rd Strike** for Fightcade FBNeo's Japan 990512 NO CD ROM (`sfiii3nr1`). Select its game tab and prepare a session from a `.fs` save state. Generic standing/crouching normals, motions (including two-button EX inputs), and movement templates are available; character-specific routes can use custom moves. Health, position, stocks, partial meter, and hitstun are read without gameplay-memory writes. True-combo verification remains disabled pending live calibration. Stock caps are unavailable because EX moves spend partial bars. Memory mappings are based on the installed CPS3 hitbox script and [FBNeo training mode](https://github.com/peon2/fbneo-training-mode/blob/master/games/sfiii3/sfiii3.lua).
+
 ## Offline architecture smoke test
 
 Run the smallest restore → execute → score slice without FBNeo or third-party dependencies:

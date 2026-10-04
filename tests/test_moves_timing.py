@@ -8,9 +8,66 @@ from combochan.bridge import Step
 from combochan.dashboard import DEFAULT_RULES, validate_rules
 from combochan.dashboard_worker import continuation_candidates, select_frontier, timing_options
 from combochan.games import get_game
-from combochan.moves import parse_sequence
+from combochan.moves import parse_sequence, parse_starter
 
 class MovesAndTimingTests(unittest.TestCase):
+    def test_compact_starter_notation_and_named_moves(self):
+        game=get_game('vampire-savior')
+        rules=validate_rules({'custom_moves':[{'name':'My opening','sequence':'LP, N, HP','enabled':True}]},game)
+        actions=game.search_actions(rules)
+        for text in ('2LK2LK','2lk 2lk','c.LK > c.LK','2LK, 2LK'):
+            self.assertEqual(parse_starter(text,actions),['c.LK','c.LK'])
+        self.assertEqual(parse_starter('5LP236HP',actions),['LP','236HP'])
+        self.assertEqual(parse_starter('My opening > 2HP',actions),['My opening','c.HP'])
+        for text in ('2LKwat','2LK,,2HP','2LK >',';','2LK'*9):
+            with self.subTest(text=text),self.assertRaises(ValueError):parse_starter(text,actions)
+        for changes in ({'disabled_buttons':['LK']},{'disabled_actions':['c.LK']},{'depth':1}):
+            with self.subTest(changes=changes),self.assertRaises(ValueError):
+                validate_rules({'starters':['2LK2LK'],**changes},game)
+
+    def test_sequence_starter_forces_prefix_then_allows_followups(self):
+        game=get_game('vampire-savior')
+        rules=validate_rules({'starters':['2LK2LK'],'max_start_delay':2},game)
+        actions=game.search_actions(rules)
+        first=continuation_candidates({'steps':(),'notation':''},actions,rules)
+        self.assertEqual({c['last'] for c in first},{'c.LK'})
+        self.assertEqual({c['delay'] for c in first},{0,1,2})
+        second=continuation_candidates(first[0],actions,rules)
+        self.assertEqual({c['last'] for c in second},{'c.LK'})
+        self.assertTrue(all(c['delay']>=1 for c in second))
+        self.assertGreater(len({c['delay'] for c in second}),1)
+        self.assertTrue(all(c['action_names']==['c.LK','c.LK'] for c in second))
+        following=continuation_candidates(second[0],actions,rules)
+        self.assertTrue(any(c['last']=='c.HP' for c in following))
+
+    def test_multiple_starters_include_custom_moves_and_only_restrict_opening(self):
+        game=get_game('vampire-savior')
+        rules=validate_rules({'starters':['c.LK','c.HP','Opening','c.LK'],'max_start_delay':3,
+            'custom_moves':[{'name':'Opening','sequence':'LP, N, HP','enabled':True}]},game)
+        self.assertEqual(rules['starters'],['c.LK','c.HP','Opening'])
+        self.assertEqual(rules['starter'],'')
+        candidates=continuation_candidates({'steps':(),'notation':''},game.search_actions(rules),rules)
+        self.assertEqual({c['last'] for c in candidates},set(rules['starters']))
+        for starter in rules['starters']:
+            openings=[c for c in candidates if c['last']==starter]
+            self.assertEqual({c['delay'] for c in openings},set(range(4)))
+            parent={**openings[0],'state':{'p1':{'y':40}}}
+            followups=continuation_candidates(parent,game.search_actions(rules),rules)
+            self.assertTrue(any(c['last'] not in rules['starters'] for c in followups))
+
+    def test_multiple_starter_validation_and_legacy_migration(self):
+        game=get_game('vampire-savior')
+        for change in ({'starters':'LP'},{'starters':None},{'starters':[None]},
+                       {'starters':['']},{'starters':['missing']},
+                       {'starters':['LP','c.HP'],'disabled_actions':['LP']},
+                       {'starters':['c.LK'],'disabled_buttons':['LK']},
+                       {'starters':['236LP'],'groups':['normals']}):
+            with self.subTest(change=change),self.assertRaises(ValueError):validate_rules(change,game)
+        self.assertEqual(validate_rules({},game)['starters'],[])
+        migrated=validate_rules({'starter':'c.LK'},game)
+        self.assertEqual(migrated['starters'],['c.LK'])
+        self.assertEqual(migrated['starter'],'c.LK')
+
     def test_selected_starter_only_restricts_first_action(self):
         game=get_game('vampire-savior')
         for starter in ('c.LK','Opening'):

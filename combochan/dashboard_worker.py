@@ -9,6 +9,7 @@ import time
 from .bridge import Bridge, Step, Trial
 from .evaluate import repeatability
 from .games import get_game
+from .moves import parse_starter
 from .policy import Policy
 
 
@@ -42,8 +43,13 @@ def timing_options(parent, rules):
 
 def continuation_candidates(parent,actions,rules,vsav_ordering=True):
     actions=list(actions)
-    if not parent['steps'] and rules.get('starter'):
-        actions=[action for action in actions if action.name==rules['starter']]
+    starters=rules.get('starters') or ([rules['starter']] if rules.get('starter') else [])
+    sequences=rules.get('_starter_sequences')
+    if sequences is None: sequences=[parse_starter(starter,actions) for starter in starters]
+    names=parent.get('action_names',[])
+    if sequences and not any(names[:len(sequence)]==sequence for sequence in sequences):
+        next_names={sequence[len(names)] for sequence in sequences if sequence[:len(names)]==names and len(sequence)>len(names)}
+        actions=[action for action in actions if action.name in next_names]
     if parent['steps'] and vsav_ordering:
         previous=parent.get('last','')
         buttons=['LP','LK','MP','MK','HP','HK']
@@ -186,6 +192,9 @@ def execute(config, emit_event=emit):
     emit_event(stage='model',message='Loading local Laya.' if rules['policy']=='laya' else 'Preparing the search.')
     policy=Policy(rules['policy'],rules['seed'],Path(config['model']))
     actions=game.search_actions(rules)
+    starters=rules.get('starters') or ([rules['starter']] if rules.get('starter') else [])
+    sequences=[parse_starter(starter,actions) for starter in starters]
+    search_rules={**rules,'_starter_sequences':sequences}
     frontier=[{'steps':(), 'notation':'', 'score':{'damage':0},'state':initial,'landing_delays':game.landing_delays(records[0]['trace'],0,rules.get('max_delay',60))}]
     best=None
     finishers=set()
@@ -198,7 +207,7 @@ def execute(config, emit_event=emit):
         pools=[]
         pool_parents=[]
         for parent in frontier:
-            candidates=continuation_candidates(parent,actions,rules,getattr(game,"vsav_ordering",True))
+            candidates=continuation_candidates(parent,actions,search_rules,getattr(game,"vsav_ordering",True))
             if hasattr(game,'order_continuations'):
                 candidates=game.order_continuations(candidates,parent,rules)
             if candidates:
@@ -283,7 +292,8 @@ def execute(config, emit_event=emit):
                 candidate['contact_delays']=list(dict.fromkeys(d+shift for d in contacts[-1:] for shift in (-1,0,-2,1,2,3,4,5,6,7,8) if 0<=d+shift<=rules.get('max_delay',60)))
                 completed+=1
                 simulator_frames+=score['frames']
-                if score['candidate_valid']:
+                prefix_complete=not sequences or any(candidate['action_names'][:len(sequence)]==sequence for sequence in sequences)
+                if score['candidate_valid'] and prefix_complete:
                     if depth==1 and score['damage']>0 and (not finishers or score['damage']>=best['score']['damage']):
                         finishers={candidate['last']}
                     finalists.append(candidate)
@@ -293,7 +303,7 @@ def execute(config, emit_event=emit):
                 # No-hit movement/setup branches can lead to later hits. Keep a bounded sample.
                 if set(score['rejection_reasons']) <= {'no_damage','unresolved_hitstun'}:
                     # Ineffective normal presses must not displace actual chain extensions.
-                    if candidate['group']!='normals' or score['damage']>candidate['parent_damage'] or candidate['parent_damage']==0:
+                    if not prefix_complete or candidate['group']!='normals' or score['damage']>candidate['parent_damage'] or candidate['parent_damage']==0:
                         survivors.append(candidate)
             emit_event(stage='searching',completed=completed,budget=rules['budget'],depth=depth,
                 damage=best['score']['damage'] if best else 0,notation=best['notation'] if best else '',
@@ -331,21 +341,31 @@ def execute(config, emit_event=emit):
 
 def execute_queue(config, emit_event=emit):
     snapshots=config.get('snapshots',[])
-    if config['action']=='replay' or not snapshots:
+    if config['action']=='replay':
         return execute(config,emit_event)
+    starters=(config['rules'].get('starters') or [config['rules'].get('starter','')]) if config['action']=='search' else ['']
+    if not snapshots and len(starters)==1:
+        return execute(config,emit_event)
+    if not snapshots:
+        snapshots=[{'file':config.get('snapshot_file','root.fs'),'source':''}]
     session=Path(config['session'])
-    for index,snapshot in enumerate(snapshots,1):
+    searches=[(state_index,snapshot,starter) for state_index,snapshot in enumerate(snapshots,1) for starter in starters]
+    for index,(state_index,snapshot,starter) in enumerate(searches,1):
         if (session/'cancel.flag').exists(): raise Cancelled('Queue stopped. Completed results were kept.')
-        emit_event(stage='starting',queue_index=index,queue_total=len(snapshots),snapshot_source=snapshot['source'],
-                   completed=0,damage=0,notation='',depth=0,message=f"Starting state {index} of {len(snapshots)}: {snapshot['source']}")
+        context={'queue_index':index,'queue_total':len(searches),'state_index':state_index,'state_total':len(snapshots),
+                 'snapshot_source':snapshot['source'],'starter':starter}
+        emit_event(stage='starting',**context,completed=0,damage=0,notation='',depth=0,
+                   message=f"Starting {'search' if config['action']=='search' else 'check'} {index} of {len(searches)}"+(f' with {starter}.' if starter else '.'))
         def forward(**event):
-            event.update(queue_index=index,queue_total=len(snapshots),snapshot_source=snapshot['source'])
-            if 'result' in event: event['result']['snapshot_source']=snapshot['source']
+            event.update(context)
+            if 'result' in event:
+                event['result'].update(snapshot_source=snapshot['source'],starter=starter)
             if event.get('stage')=='complete': event['stage']='searching' if config['action']=='search' else 'checking'
             emit_event(**event)
-        execute({**config,'snapshot_file':snapshot['file']},forward)
+        rules={**config['rules'],'starter':starter,'starters':[starter] if starter else []} if config['action']=='search' else config['rules']
+        execute({**config,'snapshot_file':snapshot['file'],'rules':rules},forward)
     if (session/'cancel.flag').exists(): raise Cancelled('Queue stopped. Completed results were kept.')
-    emit_event(stage='complete',message=f'Finished all {len(snapshots)} save states.')
+    emit_event(stage='complete',message=f"Finished all {len(searches)} {'searches' if config['action']=='search' else 'save-state checks'}.")
 
 
 def main():

@@ -3,7 +3,7 @@ const $ = id => document.getElementById(id);
 const busyStages = new Set(['starting','checking','model','searching','validating','replaying','stopping']);
 let token = '', currentGame = '', state = null, dirty = false, pending = false, initialized = false, offline = false;
 let resultTab='all', clearedResults=[];
-const defaults = {resources:'state',stock_cap:0,true_combo:true,policy:'heuristic',budget:600,depth:5,beam:8,seed:0,delays:[0,2,4,6,8,12,16],max_frames:180,tail:90,groups:['normals','motions','movement'],custom_moves:[],disabled_actions:[],disabled_buttons:[],starter:'',auto_timing:true,max_delay:60,max_start_delay:0};
+const defaults = {resources:'state',stock_cap:0,true_combo:true,policy:'heuristic',budget:600,depth:5,beam:8,seed:0,delays:[0,2,4,6,8,12,16],max_frames:180,tail:90,groups:['normals','motions','movement'],custom_moves:[],disabled_actions:[],disabled_buttons:[],starter:'',starters:[],auto_timing:true,max_delay:60,max_start_delay:0};
 const fieldMap = {'stock_cap':'stock-cap','true_combo':'true-combo','max_frames':'max-frames','auto_timing':'auto-timing','max_delay':'max-delay','max_start_delay':'max-start-delay'};
 function notice(message, success=false) { $('notice-text').textContent=message; $('notice').hidden=false; $('notice').classList.toggle('success',success); }
 function hideNotice() { $('notice').hidden=true; }
@@ -18,9 +18,10 @@ async function api(path, data, retry=true) {
   return result;
 }
 function el(tag,text,className) { const node=document.createElement(tag); if(text!==undefined) node.textContent=text; if(className) node.className=className; return node; }
-function markDirty() { refreshStarter(); dirty=true; $('save-state').textContent='Unsaved changes'; renderControls(); }
+function markDirty() { dirty=true; $('save-state').textContent='Unsaved changes'; renderControls(); }
 function loadRules(rules) {
   for (const [key,value] of Object.entries(rules)) {
+    if(key==='starter'||key==='starters') continue;
     if(key==='custom_moves') { renderCustomMoves(value); continue; }
     if(key==='disabled_actions') { document.querySelectorAll('[data-move]').forEach(input=>input.checked=!value.includes(input.dataset.move)); continue; }
     if(key==='disabled_buttons') { document.querySelectorAll('[data-search-button]').forEach(input=>input.checked=!value.includes(input.dataset.searchButton)); continue; }
@@ -28,30 +29,22 @@ function loadRules(rules) {
     const input=$(fieldMap[key] || key); if(!input) continue;
     if(input.type==='checkbox') input.checked=value; else input.value=Array.isArray(value)?value.join(', '):value;
   }
-  refreshStarter(rules.starter || '');
+  $('starter').value=(rules.starters?.length?rules.starters:rules.starter?[rules.starter]:[]).join('; ');
   $('cap-field').hidden=$('resources').value!=='cap';
 }
-function refreshStarter(selected=$('starter').value) {
-  const game=state?.games.find(game=>game.id===currentGame);
-  if(!game) return;
-  const groups=new Set([...document.querySelectorAll('[data-group]:checked')].map(input=>input.dataset.group));
-  const disabled=new Set([...document.querySelectorAll('[data-move]:not(:checked)')].map(input=>input.dataset.move));
-  const disabledButtons=new Set([...document.querySelectorAll('[data-search-button]:not(:checked)')].map(input=>input.dataset.searchButton));
-  const names=(game.moves||[]).filter(move=>groups.has(move.group)&&!disabled.has(move.name)&&!(move.buttons||[]).some(button=>disabledButtons.has(button))).map(move=>move.name);
-  document.querySelectorAll('.custom-move').forEach(row=>{
-    const name=row.querySelector('[data-name]').value.trim();
-    const buttons=row.querySelector('[data-sequence]').value.toUpperCase().split(',').flatMap(step=>step.split(':')[0].split('+').map(button=>button.trim()));
-    if(name&&row.querySelector('[data-enabled]').checked&&!buttons.some(button=>disabledButtons.has(button))) names.push(name);
-  });
-  const option=(name,label=name)=>{const node=el('option',label);node.value=name;return node};
-  const options=[option('','Any enabled move'),...[...new Set(names)].map(name=>option(name))];
-  if(selected&&!names.includes(selected)) options.push(option(selected,selected+' (unavailable — enable or choose another move)'));
-  $('starter').replaceChildren(...options);$('starter').value=selected;
+function selectedStarters() {
+  const text=$('starter').value.trim();
+  if(!text) return [];
+  const starters=text.split(';').map(value=>value.trim());
+  if(starters.some(value=>!value)) throw new Error('Enter a starter between each semicolon, for example 2LK2LK; 2HP.');
+  return starters;
 }
 function readRules() {
   const result={};
   for(const key of Object.keys(defaults)) {
-    if(key==='custom_moves') result.custom_moves=[...document.querySelectorAll('.custom-move')].map(row=>({name:row.querySelector('[data-name]').value,sequence:row.querySelector('[data-sequence]').value,enabled:row.querySelector('[data-enabled]').checked}));
+    if(key==='starter') result.starter='';
+    else if(key==='starters') result.starters=selectedStarters();
+    else if(key==='custom_moves') result.custom_moves=[...document.querySelectorAll('.custom-move')].map(row=>({name:row.querySelector('[data-name]').value,sequence:row.querySelector('[data-sequence]').value,enabled:row.querySelector('[data-enabled]').checked}));
     else if(key==='disabled_actions') result.disabled_actions=[...document.querySelectorAll('[data-move]:not(:checked)')].map(input=>input.dataset.move);
     else if(key==='disabled_buttons') result.disabled_buttons=[...document.querySelectorAll('[data-search-button]:not(:checked)')].map(input=>input.dataset.searchButton);
     else if(key==='groups') result.groups=[...document.querySelectorAll('[data-group]:checked')].map(input=>input.dataset.group);
@@ -148,7 +141,7 @@ function renderHistory() {
   $('results').replaceChildren(...history.map(result=>{
     const row=el('tr'), name=el('td'), route=el('div',result.notation.replace(/^root\s*>\s*/,''),'route-name');
     const date=new Date(result.created*1000).toLocaleString(undefined,{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
-    name.append(route,el('div',`${date} · ${result.evaluated} trials${result.snapshot_source?' · '+result.snapshot_source.split(/[\\/]/).pop():''}`,'route-meta'));
+    name.append(route,el('div',`${date} · ${result.evaluated} trials${result.starter?' · starter '+result.starter:''}${result.snapshot_source?' · '+result.snapshot_source.split(/[\\/]/).pop():''}`,'route-meta'));
     const damage=el('td',String(result.damage),'damage-cell'), policy=el('td',result.policy==='laya'?'Laya':result.policy==='random'?'Random':'Heuristic');
     const validation=el('td'); validation.title=result.failed_validation?'The route failed repeatability or defensive replay checks. It is not a verified combo.':result.damage_only?'MVC2 hitstun is uncalibrated. Damage alone does not establish a true combo.':''; validation.append(el('span',result.verified?'✓ Verified combo':result.failed_validation?'Failed validation':result.escape_checked?'Escape checks passed':result.damage_only?'Damage only · gaps possible':'Unverified',result.verified?'verified':'candidate'));
     const action=el('td'), buttons=el('div',undefined,'result-actions'), replay=el('button','Replay ↗'); replay.type='button';
@@ -175,7 +168,7 @@ function render() {
   $('run-stage').textContent=job.stage==='idle'?'READY WHEN YOU ARE':job.stage.toUpperCase();
   $('run-heading').textContent=titles[job.stage]||job.stage;
   $('run-message').textContent=job.stage==='idle'?(connection.connected?'Runner connected. Start a search or check restoration first.':connection.prepared?'Load your prepared session script to connect the runner.':'Prepare a session to get started.'):job.message;
-  if(job.queue_total) $('run-message').textContent=`State ${job.queue_index} of ${job.queue_total} · ${(job.snapshot_source||'').split(/[\\/]/).pop()} — ${job.message}`;
+  if(job.queue_total) $('run-message').textContent=`Run ${job.queue_index} of ${job.queue_total}${job.snapshot_source?' · '+job.snapshot_source.split(/[\\/]/).pop():''}${job.starter?' · starter '+job.starter:''} — ${job.message}`;
   const history=state.history.filter(r=>r.game===currentGame);
   $('best-damage').textContent=job.damage ?? (history.length?Math.max(...history.map(r=>r.damage)):'—');
   $('trial-count').textContent=job.completed || '—';
