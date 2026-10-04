@@ -8,6 +8,8 @@ The dashboard searches normals, motion inputs, and movement templates for P1 aga
 
 The dashboard includes **Street Fighter III: 3rd Strike** for Fightcade FBNeo's Japan 990512 NO CD ROM (`sfiii3nr1`). Select its game tab and prepare a session from a `.fs` save state. Generic standing/crouching normals, motions (including two-button EX inputs), and movement templates are available; character-specific routes can use custom moves. Health, position, stocks, partial meter, and hitstun are read without gameplay-memory writes. True-combo verification remains disabled pending live calibration. Stock caps are unavailable because EX moves spend partial bars. Memory mappings are based on the installed CPS3 hitbox script and [FBNeo training mode](https://github.com/peon2/fbneo-training-mode/blob/master/games/sfiii3/sfiii3.lua).
 
+The dashboard also supports **X-Men vs. Street Fighter**, Euro 961004 (`xmvsf`), in Fightcade FBNeo. Select its tab, prepare a `.fs` snapshot, and load the generated Lua script in your existing emulator. It reads point/anchor health, recoverable health, positions, shared meter and the engine's received-hit counter. Normals, motions, paired-button hyper inputs, jumps, dashes and super jumps are available. True-combo searches use counter continuity and defensive replays; stock caps are supported. Character-specific commands can use custom moves. Tag/active-character transitions are rejected. See the [XMVSF setup and calibration guide](docs/XMVSF.md).
+
 ## Offline architecture smoke test
 
 Run the smallest restore → execute → score slice without FBNeo or third-party dependencies:

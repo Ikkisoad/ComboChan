@@ -9,7 +9,14 @@ local expected_rom = config and config.rom or "vsavj"
 assert(emu.romname() == expected_rom, "Wrong ROM for selected game profile")
 local function read_field(spec)
     local readers = {u8=rb, u16=rw, s16=rs}
-    local value = readers[spec.type](spec.address)
+    local address = spec.address
+    -- Built-in tag-game profiles select point/anchor health independently.
+    if spec.selector_address then
+        local active = rb(spec.selector_address)
+        assert(active == 0 or active == 1, "Invalid active character selector")
+        if active == 1 then address = assert(spec.alternate_address) end
+    end
+    local value = readers[spec.type](address)
     if spec.mask then
         local result, place, mask = 0, 1, spec.mask
         while mask > 0 do

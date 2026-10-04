@@ -41,7 +41,7 @@ def validate_profile(data):
     for key in ('id', 'rom'):
         if not isinstance(data[key], str) or not re.fullmatch(r'[a-z0-9][a-z0-9_-]{0,63}', data[key]):
             raise ValueError(f'{key} must use 1-64 lowercase letters, digits, underscores or hyphens.')
-    if data['id'] in ('vampire-savior','marvel-vs-capcom-2','street-fighter-iii-third-strike'):
+    if data['id'] in ('vampire-savior','marvel-vs-capcom-2','street-fighter-iii-third-strike','x-men-vs-street-fighter'):
         raise ValueError('Use a unique id; built-in game IDs are reserved.')
     if not isinstance(data['title'], str) or not 1 <= len(data['title'].strip()) <= 80:
         raise ValueError('Enter a game title (1-80 characters).')

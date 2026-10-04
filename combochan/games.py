@@ -76,7 +76,7 @@ class VampireSavior:
 
     def validate_rules(self, rules):
         if any(set(step.buttons) & {'A1','A2'} for action in self.search_actions(rules) for step in action.steps):
-            raise ValueError('A1/A2 are MVC2 assist buttons and are unavailable in Vampire Savior.')
+            raise ValueError(f'A1/A2 are MVC2 assist buttons and are unavailable in {self.title}.')
 
     def landing_delays(self, trace, end_frame, limit):
         # vsavj telemetry uses y=40 for the floor in the supported adapter.
@@ -178,7 +178,89 @@ class ThirdStrike(VampireSavior):
         return 'COMBOCHAN_GAME = '+lua_value({**self.telemetry,'sha256':self.profile_sha256})+'\n'
 
 
-GAMES = {game.id: game for game in (VampireSavior(), MarvelVsCapcom2(), ThirdStrike())}
+class XMenVsStreetFighter(VampireSavior):
+    id = 'x-men-vs-street-fighter'
+    title = 'X-Men vs. Street Fighter'
+    subtitle = 'Mutants meet world warriors'
+    rom = 'xmvsf'
+    badge = 'XS'
+    vsav_ordering = False
+    combo_validated = True
+    escape_checks = True
+    default_snapshot = 'G:/Games/Fightcade/emulator/fbneo/savestates/xmvsf slot 01.fs'
+
+    def __init__(self):
+        import hashlib
+        import json
+        inputs = {code: {p: p.upper()+' '+name for p in ('p1','p2')}
+                  for code, name in [('U','Up'),('D','Down'),('L','Left'),('R','Right'),
+                                     ('LP','Weak Punch'),('MP','Medium Punch'),('HP','Strong Punch'),
+                                     ('LK','Weak Kick'),('MK','Medium Kick'),('HK','Strong Kick')]}
+        players = {}
+        # FBNeo training-mode xmvsf.lua and marvel-hitboxes.lua mappings.
+        # Health banks follow the active slot; on-screen object positions are
+        # always in the point object. Combo counters count hits dealt, so P2's
+        # received-hit counter lives in P1's object (and vice versa).
+        for p, base, counter in (('p1',0xFF4000,0xFF4510),('p2',0xFF4400,0xFF4110)):
+            fields = {name: {'address': base+offset, 'type': kind} for name,offset,kind in (
+                ('health',0x211,'u8'),('recoverable',0x21B,'u8'),
+                ('stocks',0x214,'u8'),('meter',0x212,'u16'),
+                ('x',0x0C,'s16'),('y',0x10,'s16'),('facing',0x4B,'u8'),
+                ('state',0x06,'u16'),('active_character',0x220,'u8'))}
+            for name in ('health','recoverable'):
+                fields[name].update(selector_address=base+0x220,
+                                    alternate_address=fields[name]['address']+0x800)
+            fields['stun1'] = {'address':counter,'type':'u8'}
+            fields['combo_hits'] = {'address':counter,'type':'u8'}
+            players[p] = fields
+        self.telemetry = {'rom':self.rom,'inputs':inputs,'players':players}
+        self.profile_sha256 = hashlib.sha256(json.dumps(self.telemetry,sort_keys=True).encode()).hexdigest()
+
+    def public(self):
+        value = super().public()
+        value.update(combo_validated=self.combo_validated,
+                     limits='Euro 961004 (xmvsf). Active-character health, engine combo counters and defensive replay checks; calibrated on Rogue normal chains. Normals, motions, hypers and super jumps; add character-specific moves as custom inputs. Tag transitions are rejected.')
+        return value
+
+    def actions(self, groups):
+        actions = super().actions(groups)
+        if 'movement' in groups:
+            actions.extend([Action('super jump',(Step(1,('D',)),Step(8,('U',))),'movement'),
+                            Action('super jump forward',(Step(1,('D',)),Step(8,('U','F'))),'movement')])
+        return actions
+
+    def validate_initial(self, state):
+        if not all(0 <= state[p]['health'] <= 144 for p in ('p1','p2')):
+            raise ValueError('X-Men vs. Street Fighter health telemetry is outside 0-144.')
+        if any(state[p].get('active_character') not in (0,1) for p in ('p1','p2')):
+            raise ValueError('X-Men vs. Street Fighter active character must be point or anchor.')
+
+    def validate_rules(self, rules):
+        super().validate_rules(rules)
+        if rules['true_combo'] and not self.combo_validated:
+            raise ValueError('X-Men vs. Street Fighter true-combo verification requires live counter and defensive calibration; disable Require a true combo.')
+
+    def landing_delays(self, trace, end_frame, limit):
+        return []
+
+    def score(self, record, rules):
+        self.validate_rules(rules)
+        for row in record['trace']:
+            self.validate_initial(row)
+        result = super().score(record, rules)
+        initial = record['trace'][0]
+        if any(row[p]['active_character'] != initial[p]['active_character']
+               for row in record['trace'] for p in ('p1','p2')):
+            result['candidate_valid'] = False
+            result['rejection_reasons'].append('tag_or_character_transition')
+        return result
+
+    def session_script(self):
+        from .game_profile import lua_value
+        return 'COMBOCHAN_GAME = '+lua_value({**self.telemetry,'sha256':self.profile_sha256})+'\n'
+
+
+GAMES = {game.id: game for game in (VampireSavior(), MarvelVsCapcom2(), ThirdStrike(), XMenVsStreetFighter())}
 
 
 def get_game(game_id):
