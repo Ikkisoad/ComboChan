@@ -11,6 +11,7 @@ from .evaluate import repeatability
 from .games import get_game
 from .moves import parse_starter
 from .policy import Policy
+from .timing import observe, preferred_delays, stun_end
 
 
 def emit(**event):
@@ -72,6 +73,9 @@ def continuation_candidates(parent,actions,rules,vsav_ordering=True):
                 duration=sum(s.frames for s in action.steps)
                 command_windows=[d-duration+1+shift for d in parent.get('contact_frames',[]) for shift in (0,-1,1,-2,2)]
                 action_delays=list(dict.fromkeys([d for d in command_windows if 0<=d<=rules.get('max_delay',60)]+delays))
+            if parent['steps'] and rules.get('auto_timing',True) and rules.get('_timing_observations'):
+                learned=preferred_delays(parent,action,rules['_timing_observations'].get(action.name),rules.get('max_delay',60))
+                action_delays=list(dict.fromkeys(learned+action_delays))
             delay=action_delays[round_index%len(action_delays)] if parent['steps'] else delays[(round_index+index)%len(delays)]
             # Consecutive presses of the same button need a release frame.
             if parent['steps'] and set(parent['steps'][-1].buttons)&set(action.steps[0].buttons)&{'LP','LK','MP','MK','HP','HK'} and delay==0:
@@ -88,6 +92,7 @@ def continuation_candidates(parent,actions,rules,vsav_ordering=True):
             candidates.append({'steps':steps,'notation':notation,'label':f'{delay}f {action.name}',
                                'group':action.group,'last':action.name,'delay':delay,'parent_damage':parent['score']['damage'] if 'score' in parent else 0,
                                'action_names':parent.get('action_names',[])+[action.name],
+                               'checkpoint_steps':len(parent['steps']),
                                '_timing_round':round_index,'_action_order':index})
     if parent['steps'] and vsav_ordering and rules.get('auto_timing',True):
         # Spend the first windows on plausible chain continuations, before motion spam.
@@ -103,18 +108,40 @@ def continuation_candidates(parent,actions,rules,vsav_ordering=True):
 
 
 def select_frontier(survivors, width):
-    survivors.sort(key=lambda c:(-c['score']['damage'],abs(c['state']['p2']['x']-c['state']['p1']['x'])))
+    survivors=sorted(survivors,key=lambda c:(-c['score']['damage'],abs(c['state']['p2']['x']-c['state']['p1']['x'])))
     chosen=[];seen=set()
+    # Reserve exploration slots for routes that still have room to continue.
+    # These signals guide experiments; final ranking remains measured damage.
+    promising=sorted((c for c in survivors if c.get('extension_window',0)>0),key=lambda c:(
+        -c.get('extension_window',0),-c['score'].get('hit_count',0),
+        abs(c['state']['p2']['x']-c['state']['p1']['x']),-c['score']['damage']))
+    openings=set()
+    for candidate in promising:
+        opening=tuple(candidate.get('action_names',[candidate['last']])[:1])
+        if opening in openings: continue
+        chosen.append(candidate);openings.add(opening);seen.add(candidate['last'])
+        if len(chosen)>=max(1,width//2): break
     # Reserve half the beam for action diversity; retain timing alternatives too.
     for candidate in survivors:
+        if len(chosen)>=max(1,width//2): break
         if candidate['last'] not in seen:
             chosen.append(candidate);seen.add(candidate['last'])
-        if len(chosen)>=max(1,width//2): break
     selected={id(c) for c in chosen}
     for candidate in survivors:
         if len(chosen)>=width: break
         if id(candidate) not in selected:chosen.append(candidate)
     return chosen
+
+
+def extension_window(trace, end_frame, score):
+    """Observed remaining opponent stun, never a claim about P1 recovery."""
+    if not score.get('damage_events'): return 0
+    contact=score['damage_events'][-1]['frame']
+    # Null hitstun (MVC2) provides no usable window.
+    rows=trace[contact:]
+    if not rows or any(row['p2'].get('stun1') is None for row in rows): return 0
+    recovery=next((row['frame'] for row in rows if not (row['p2'].get('stun1') or row['p2'].get('stun2'))),None)
+    return max(0,(recovery if recovery is not None else trace[-1]['frame'])-max(contact,end_frame))
 
 
 def reserve_finisher_trial(candidates, pools, frontier, finishers, quota):
@@ -210,6 +237,30 @@ def execute(config, emit_event=emit):
     completed=0
     simulator_frames=0
     manifests=[manifest]
+    timing_observations={}
+    if rules.get('learn_timing',True) and rules.get('auto_timing',True) and rules['depth']>1:
+        # Bounded warm-up, counted in the same budget as search trials. Single
+        # move contact latency is local to this state, not universal startup.
+        preferred={name for sequence in sequences for name in sequence}
+        probe_actions=sorted(actions,key=lambda a:(a.name not in preferred,a.group=='movement'))
+        probe_actions=[a for a in probe_actions if sum(s.frames for s in a.steps)<=min(rules['max_frames'],1200-rules['tail'])]
+        probe_actions=probe_actions[:min(32,max(1,rules['budget']//10))]
+        for start in range(0,len(probe_actions),16):
+            group=probe_actions[start:start+16]
+            emit_event(stage='searching',message='Measuring move contact and available hitstun signals before exploring delays.',completed=completed,budget=rules['budget'])
+            trials=[]
+            for i,action in enumerate(group):
+                candidate={'steps':action.steps,'action_names':[action.name]}
+                tail=game.trial_tail(candidate,rules) if hasattr(game,'trial_tail') else rules['tail']
+                trials.append(Trial(f'timing_{start+i}',action.steps,tail=min(tail,1200-sum(s.frames for s in action.steps))))
+            observations,manifest=run(trials)
+            manifests.append(manifest)
+            for action,record in zip(group,observations):
+                score=game.score(record,rules)
+                if set(score['rejection_reasons'])<={'no_damage','unresolved_hitstun','unresolved_damage'}:
+                    timing_observations[action.name]=observe(action,record['trace'],score)
+                completed+=1;simulator_frames+=score['frames']
+        search_rules['_timing_observations']=timing_observations
     for depth in range(1,rules['depth']+1):
         check_cancel()
         pools=[]
@@ -252,7 +303,8 @@ def execute(config, emit_event=emit):
                        budget=rules['budget'],depth=depth,model_calls=len(policy.calls))
             for candidate in batch:
                 candidate['tail']=(game.trial_tail(candidate,rules) if hasattr(game,'trial_tail') else rules['tail'])
-            trials=[Trial(f'd{depth}_{offset+i}',c['steps'],tail=c['tail']) for i,c in enumerate(batch)]
+            trials=[Trial(f'd{depth}_{offset+i}',c['steps'],tail=c['tail'],
+                          checkpoint_steps=c['checkpoint_steps'] if rules.get('checkpoints',True) else 0) for i,c in enumerate(batch)]
             records,manifest=run(trials)
             manifests.append(manifest)
             retry_indexes=[]
@@ -291,6 +343,8 @@ def execute(config, emit_event=emit):
                 candidate['score']=score
                 end_frame=sum(s.frames for s in candidate['steps'])
                 candidate['state']=record['trace'][end_frame]
+                candidate['extension_window']=extension_window(record['trace'],end_frame,score)
+                candidate['stun_ends_at']=stun_end(record['trace'],score)
                 if hasattr(game,'annotate_candidate'):
                     game.annotate_candidate(candidate,record['trace'],end_frame,rules)
                 candidate['landing_delays']=game.landing_delays(record['trace'],end_frame,rules.get('max_delay',60))
@@ -341,7 +395,7 @@ def execute(config, emit_event=emit):
         if passed: break
     result={'game':game.id,'game_profile':getattr(game,'definition',None),'profile_sha256':profile_hash,'starting_hitstun':starting_hitstun,'rules':rules,'best':export,'evaluated':completed,'simulator_frames':simulator_frames,
             'wall_seconds':time.monotonic()-started,'snapshot_sha256':snapshot_hash,'session':str(session),
-            'validation_attempts':validation_attempts,'model':policy.model_info,'model_calls':policy.calls,'manifests':manifests,
+            'validation_attempts':validation_attempts,'timing_observations':timing_observations,'model':policy.model_info,'model_calls':policy.calls,'manifests':manifests,
             'scope':'Best found within the selected input templates and budget; no global optimality claim.'}
     emit_event(stage='complete',completed=completed,damage=export['damage'] if export else 0,
                message=('Search finished.' if export['reproduced'] else 'No shortlisted route passed validation. The saved route is marked Failed validation.') if export else 'No valid damaging sequence found in this search.',result=result)

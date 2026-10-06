@@ -34,8 +34,21 @@ class DashboardTests(unittest.TestCase):
         self.assertFalse(game.score(record,{**DEFAULT_RULES,'resources':'cap','stock_cap':0})['candidate_valid'])
 
     def test_rule_validation(self):
-        for change in ({'budget':0},{'depth':9},{'delays':[-1]},{'groups':[]},{'groups':['unimplemented']},{'groups':[{}]},{'true_combo':'yes'}):
+        for change in ({'budget':0},{'depth':65},{'max_frames':961},{'delays':[-1]},{'groups':[]},{'groups':['unimplemented']},{'groups':[{}]},{'true_combo':'yes'}):
             with self.assertRaises(ValueError): validate_rules({**DEFAULT_RULES,**change},get_game('vampire-savior'))
+
+    def test_dashboard_accepts_64_actions_and_64_move_starter(self):
+        game=get_game('vampire-savior')
+        starter='2LK'*64
+        rules=validate_rules({'depth':64,'starters':[starter]},game)
+        self.assertEqual(len(rules['starters']),1)
+        long_name='x'*80
+        named_starter=' > '.join([long_name]*64)
+        named_rules=validate_rules({'depth':64,'starters':[named_starter],
+            'custom_moves':[{'name':long_name,'sequence':'LP, N, HP','enabled':True}]},game)
+        self.assertEqual(len(named_rules['starters'][0]),5309)
+        with self.assertRaisesRegex(ValueError,'at most 64 moves'):
+            validate_rules({'depth':64,'starters':['2LK'*65]},game)
 
     def test_prepare_preserves_original_and_isolates_sessions(self):
         before=self.snapshot.read_bytes()
@@ -82,6 +95,66 @@ class DashboardTests(unittest.TestCase):
         self.assertEqual(launch.call_args.args[1], self.exe.parent)
         self.assertIs(self.app.owned_emulators[0], launch.return_value)
 
+    def test_close_emulators_only_requests_owned_processes_for_selected_game(self):
+        class Process:
+            def __init__(self): self.close_calls=0
+            def poll(self): return None
+            def terminate(self): self.close_calls+=1
+            def close_gracefully(self): self.close_calls+=1
+        self.app.prepare(self.data)
+        old_session=self.app.session('vampire-savior')
+        self.app.prepare(self.data)
+        current_session=self.app.session('vampire-savior')
+        other={**self.data,'game':'x-men-vs-street-fighter'}
+        self.app.prepare(other)
+        selected_old,selected_current,unrelated=Process(),Process(),Process()
+        self.app.owned_emulators=[selected_old,selected_current,unrelated]
+        self.app.emulator_sessions={str(old_session):selected_old,str(current_session):selected_current,
+                                    str(self.app.session('x-men-vs-street-fighter')):unrelated}
+        result=self.app.close_emulators('vampire-savior')
+        self.assertEqual([selected_old.close_calls,selected_current.close_calls,unrelated.close_calls],[1,1,0])
+        self.assertEqual((result['requested'],result['pending']), (2,2))
+        self.assertEqual(len(self.app.owned_emulators),3)
+        self.assertEqual(self.app.emulator_status('vampire-savior'),{'owned':2,'close_requested':2})
+
+    def test_failed_emulator_close_retains_owned_handle(self):
+        class FailingProcess:
+            def poll(self): return None
+            def terminate(self): raise OSError('close failed')
+            def close_gracefully(self): raise OSError('close failed')
+        self.app.prepare(self.data)
+        session=self.app.session('vampire-savior')
+        process=FailingProcess()
+        self.app.owned_emulators=[process]
+        self.app.emulator_sessions[str(session)]=process
+        result=self.app.close_emulators('vampire-savior')
+        self.assertEqual(result['failed'],1)
+        self.assertEqual(result['pending'],1)
+        self.assertIs(self.app.owned_emulators[0],process)
+        self.assertIs(self.app.emulator_sessions[str(session)],process)
+
+    def test_windows_close_with_no_window_stays_retryable(self):
+        class WindowlessProcess:
+            def __init__(self): self.close_calls=0
+            def poll(self): return None
+            def close_gracefully(self): self.close_calls+=1; return 0
+        self.app.prepare(self.data)
+        session=self.app.session('vampire-savior')
+        process=WindowlessProcess()
+        self.app.owned_emulators=[process]
+        self.app.emulator_sessions[str(session)]=process
+        first=self.app.close_emulators('vampire-savior')
+        second=self.app.close_emulators('vampire-savior')
+        self.assertEqual((first['failed'],first['pending']),(1,1))
+        self.assertEqual((second['failed'],second['pending']),(1,1))
+        self.assertEqual(process.close_calls,2)
+        self.assertNotIn(id(process),self.app.emulator_close_requested)
+
+    def test_close_emulators_rejected_while_job_active(self):
+        self.app.job={'stage':'searching'}
+        with self.assertRaisesRegex(ValueError,'A job is active'):
+            self.app.close_emulators('vampire-savior')
+
     def test_stop_is_cooperative(self):
         self.app.prepare(self.data); session=self.app.session('vampire-savior')
         self.app.job={'stage':'searching','session':str(session)}
@@ -92,6 +165,15 @@ class DashboardTests(unittest.TestCase):
     def test_save_persists_rules(self):
         self.app.save({**self.data,'rules':{**DEFAULT_RULES,'budget':42}})
         self.assertEqual(Dashboard(self.root).profile('vampire-savior')['rules']['budget'],42)
+
+    def test_save_special_library_alongside_starter(self):
+        rules={**DEFAULT_RULES,'true_combo':False,'starters':['2LK'],
+               'custom_moves':[{'name':'41236LK','sequence':'41236LK','enabled':True}]}
+        self.app.save({**self.data,'game':'marvel-vs-capcom-2','rules':rules})
+        saved=Dashboard(self.root).profile('marvel-vs-capcom-2')['rules']
+        self.assertEqual(saved['starters'],['2LK'])
+        self.assertEqual(saved['custom_moves'],rules['custom_moves'])
+        self.assertIn('41236LK',[action.name for action in get_game('marvel-vs-capcom-2').search_actions(saved)])
 
     def test_export_cannot_read_arbitrary_files(self):
         self.assertNotIn('../../scenario.fs',self.app.result_files())

@@ -10,6 +10,8 @@ The dashboard includes **Street Fighter III: 3rd Strike** for Fightcade FBNeo's 
 
 The dashboard also supports **X-Men vs. Street Fighter**, Euro 961004 (`xmvsf`), in Fightcade FBNeo. Select its tab, prepare a `.fs` snapshot, and load the generated Lua script in your existing emulator. It reads point/anchor health, recoverable health, positions, shared meter and the engine's received-hit counter. Normals, motions, paired-button hyper inputs, jumps, dashes and super jumps are available. True-combo searches use counter continuity and defensive replays; stock caps are supported. Character-specific commands can use custom moves. Tag/active-character transitions are rejected. See the [XMVSF setup and calibration guide](docs/XMVSF.md).
 
+**Marvel vs. Capcom: Clash of Super Heroes** is supported for the Euro 980123 FBNeo ROM (`mvsc`). The point-character adapter includes normals, motions, hypers and super jumps, with live-calibrated combo counters and defensive replays. Tags and assists are not supported. See the [MVC setup and calibration guide](docs/MVSC.md).
+
 ## Offline architecture smoke test
 
 Run the smallest restore → execute → score slice without FBNeo or third-party dependencies:

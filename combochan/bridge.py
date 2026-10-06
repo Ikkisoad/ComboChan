@@ -35,6 +35,7 @@ class Trial:
     repeats: int = 1
     tail: int = 90
     defense: str = "neutral"
+    checkpoint_steps: int = 0
 
     def validate(self):
         if not self.id or not all(c.isascii() and (c.isalnum() or c in "_-") for c in self.id):
@@ -47,6 +48,8 @@ class Trial:
             raise ValueError("Trial must have inputs and at most 1200 frames")
         if self.defense not in ("neutral", "stand", "crouch", "jump"):
             raise ValueError("Invalid defense")
+        if type(self.checkpoint_steps) is not int or not 0 <= self.checkpoint_steps < len(self.steps):
+            raise ValueError("Checkpoint must precede a continuation step")
 
 
 class Bridge:
@@ -77,7 +80,10 @@ class Bridge:
         lines = [f"COMBOCHAN1\t{job}\t{self.snapshot}\t{speed}"]
         for t in trials:
             steps = ";".join(f"{s.frames}:{','.join(s.buttons)}" for s in t.steps)
-            lines.append(f"{t.id}\t{t.repeats}\t{t.tail}\t{t.defense}\t{steps}")
+            line=f"{t.id}\t{t.repeats}\t{t.tail}\t{t.defense}\t{steps}"
+            if ready.get('prefix_checkpoints') and speed=='turbo' and t.defense=='neutral':
+                line+=f"\t{t.checkpoint_steps}"
+            lines.append(line)
         request = self.directory / "request.tsv"
         # Single writer lock; do not overwrite an unconsumed job after timeout.
         lock = self.directory / "client.lock"
@@ -116,6 +122,7 @@ class Bridge:
                         "adapter_sha256": hashlib.sha256(ready["script_content"].encode("utf-8") if "script_content" in ready else Path(ready["script"]).read_bytes()).hexdigest(),
                         "speed": speed, "actual_speed": ready.get("actual_speed", speed),
                         "backend": ready.get("backend", "fbneo"), "wall_seconds": time.monotonic() - started,
+                        "checkpoint_frames_reused": sum(r.get('checkpoint_frames',0) for r in records),
                         "trials": [asdict(t) for t in trials], "raw_results": str(result)}
             (self.directory / f"{job}.manifest.json").write_text(json.dumps(manifest, indent=2))
             return records, manifest
@@ -148,6 +155,7 @@ class BridgePool:
         manifest = {key: value for key, value in manifests[0].items()
                     if key not in ('job', 'raw_results', 'trials', 'wall_seconds')}
         manifest.update(worker_manifests=manifests, wall_seconds=time.monotonic()-started,
+                        checkpoint_frames_reused=sum(m.get('checkpoint_frames_reused',0) for m in manifests),
                         trials=[trial for m in manifests for trial in m['trials']])
         return records, manifest
 

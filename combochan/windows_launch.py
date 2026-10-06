@@ -38,6 +38,36 @@ class VisibleProcess:
                 raise ctypes.WinError(ctypes.get_last_error())
         return self.returncode
 
+    def close_gracefully(self):
+        """Ask windows owned by this still-running process to close."""
+        if self.poll() is not None:
+            return 0
+        user = ctypes.WinDLL('user32',use_last_error=True)
+        enum_windows = user.EnumWindows
+        enum_windows.argtypes = [ctypes.c_void_p,ctypes.c_void_p]
+        enum_windows.restype = w.BOOL
+        get_window_pid = user.GetWindowThreadProcessId
+        get_window_pid.argtypes = [w.HWND,ctypes.POINTER(w.DWORD)]
+        get_window_pid.restype = w.DWORD
+        post_message = user.PostMessageW
+        post_message.argtypes = [w.HWND,w.UINT,w.WPARAM,w.LPARAM]
+        post_message.restype = w.BOOL
+        wm_close = 0x0010
+        sent = []
+        callback_type = ctypes.WINFUNCTYPE(w.BOOL,w.HWND,w.LPARAM)
+
+        def visit(hwnd, _):
+            owner = w.DWORD()
+            get_window_pid(hwnd,ctypes.byref(owner))
+            if owner.value == self.pid and post_message(hwnd,wm_close,0,0):
+                sent.append(hwnd)
+            return True
+
+        callback = callback_type(visit)
+        if not enum_windows(callback,0):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return len(sent)
+
     def __del__(self):
         if self.handle:
             self.kernel.CloseHandle(self.handle)

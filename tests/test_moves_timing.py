@@ -11,15 +11,38 @@ from combochan.games import get_game
 from combochan.moves import parse_sequence, parse_starter
 
 class MovesAndTimingTests(unittest.TestCase):
+    def test_numpad_special_sequence_and_validation(self):
+        self.assertEqual(parse_sequence('41236LK'),(Step(2,('B',)),Step(2,('D','B')),
+            Step(2,('D',)),Step(2,('D','F')),Step(1,('F','LK'))))
+        self.assertEqual(parse_sequence('236lp+hp'),(Step(2,('D',)),Step(2,('D','F')),Step(1,('F','LP','HP'))))
+        for text in ('41236K','41236P','01236LK','41236LK+LK','2'*65+'LK'):
+            with self.subTest(text=text),self.assertRaises(ValueError):parse_sequence(text)
+
+    def test_sonson_special_can_extend_and_start_a_route(self):
+        game=get_game('marvel-vs-capcom-2')
+        rules=validate_rules({'true_combo':False,'starters':['2LK'],'custom_moves':[
+            {'name':'41236LK','sequence':'41236LK','enabled':True},
+            {'name':'41236HK','sequence':'41236HK','enabled':False}]},game)
+        actions=game.search_actions(rules)
+        opening=continuation_candidates({'steps':(),'notation':''},actions,rules)[0]
+        followups=continuation_candidates(opening,actions,rules)
+        self.assertTrue(any(move['last']=='41236LK' for move in followups))
+        self.assertFalse(any(move['last']=='41236HK' for move in followups))
+        rules=validate_rules({**rules,'starters':['41236LK']},game)
+        self.assertEqual({move['last'] for move in continuation_candidates({'steps':(),'notation':''},actions,rules)},{'41236LK'})
+        with self.assertRaises(ValueError):validate_rules({**rules,'disabled_buttons':['LK']},game)
+
     def test_compact_starter_notation_and_named_moves(self):
         game=get_game('vampire-savior')
         rules=validate_rules({'custom_moves':[{'name':'My opening','sequence':'LP, N, HP','enabled':True}]},game)
         actions=game.search_actions(rules)
+        self.assertEqual(parse_starter('My opening',actions),['My opening'])
+        self.assertEqual(parse_sequence('LP+LK'),(Step(1,('LP','LK')),))
         for text in ('2LK2LK','2lk 2lk','c.LK > c.LK','2LK, 2LK'):
             self.assertEqual(parse_starter(text,actions),['c.LK','c.LK'])
         self.assertEqual(parse_starter('5LP236HP',actions),['LP','236HP'])
         self.assertEqual(parse_starter('My opening > 2HP',actions),['My opening','c.HP'])
-        for text in ('2LKwat','2LK,,2HP','2LK >',';','2LK'*9):
+        for text in ('2LKwat','2LK,,2HP','2LK >',';','2LK'*65):
             with self.subTest(text=text),self.assertRaises(ValueError):parse_starter(text,actions)
         for changes in ({'disabled_buttons':['LK']},{'disabled_actions':['c.LK']},{'depth':1}):
             with self.subTest(changes=changes),self.assertRaises(ValueError):
@@ -174,6 +197,29 @@ class MovesAndTimingTests(unittest.TestCase):
         survivors=[{'last':name,'delay':delay,'score':{'damage':damage},'state':{'p1':{'x':0},'p2':{'x':10}}} for name,delay,damage in [('HP',0,10),('HP',34,10),('MP',0,9),('LP',0,8)]]
         frontier=select_frontier(survivors,3)
         self.assertEqual(len([c for c in frontier if c['last']=='HP']),2)
+
+    def test_extension_room_preserves_lower_damage_openings(self):
+        state={'p1':{'x':0},'p2':{'x':10}}
+        def route(names,damage,window):
+            return {'last':names[-1],'action_names':names,'score':{'damage':damage,'hit_count':len(names)},
+                    'state':state,'extension_window':window}
+        burst=route(['HP'],80,0)
+        light=route(['LP'],5,20)
+        light_alt=route(['LP'],6,19)
+        kick=route(['LK'],4,18)
+        selected=select_frontier([burst,light,light_alt,kick],4)
+        self.assertEqual(selected[:2],[light,kick])
+        self.assertIn(burst,selected)
+        self.assertEqual(select_frontier([burst,light],1),[light])
+
+    def test_unknown_hitstun_does_not_invent_extension_room(self):
+        from combochan.dashboard_worker import extension_window
+        trace=[{'frame':f,'p2':{'stun1':None,'stun2':None}} for f in range(20)]
+        score={'damage_events':[{'frame':3,'damage':5}]}
+        self.assertEqual(extension_window(trace,1,score),0)
+        for row in trace: row['p2']['stun1']=int(3<=row['frame']<12)
+        self.assertEqual(extension_window(trace,1,score),9)
+        self.assertEqual(extension_window(trace,10,score),2)
 
 
     def test_search_discovers_air_to_ground_route(self):

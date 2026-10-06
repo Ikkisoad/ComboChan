@@ -5,8 +5,8 @@ from .bridge import Step
 
 def parse_starter(text, actions):
     """Resolve a compact move prefix against the enabled move library."""
-    if not isinstance(text,str) or not text.strip() or len(text)>640:
-        raise ValueError('Enter a starter such as 2LK2LK or 2HP (at most 640 characters).')
+    if not isinstance(text,str) or not text.strip() or len(text)>5400:
+        raise ValueError('Enter a starter such as 2LK2LK or 2HP (at most 5400 characters).')
     names={}
     for action in actions:
         names.setdefault(action.name.casefold(),action.name)
@@ -24,7 +24,7 @@ def parse_starter(text, actions):
             if token is None:
                 raise ValueError(f'Unknown or disabled move in starter "{text}": "{remaining}". Use enabled move names or shorthand such as 2LK2LK.')
             result.append(names[token])
-            if len(result)>8: raise ValueError('A starter may contain at most 8 moves.')
+            if len(result)>64: raise ValueError('A starter may contain at most 64 moves.')
             remaining=remaining[len(token):].lstrip()
     return result
 
@@ -32,6 +32,17 @@ def parse_starter(text, actions):
 def parse_sequence(text):
     if not isinstance(text,str) or not text.strip() or len(text)>2000:
         raise ValueError('Enter a move sequence, for example LP, N, LP, F, LK, HP.')
+    # Numpad directions are relative to facing, like the existing F/B protocol.
+    # Each motion direction gets two frames; the final direction/button is a tap.
+    motion=re.fullmatch(r'([1-9]+)((?:LP|MP|HP|LK|MK|HK)(?:\+(?:LP|MP|HP|LK|MK|HK))*)',text.strip().upper())
+    if motion:
+        directions={'1':('D','B'),'2':('D',),'3':('D','F'),'4':('B',),'5':(),
+                    '6':('F',),'7':('U','B'),'8':('U',),'9':('U','F')}
+        path,buttons=motion.groups()
+        if len(path)>64: raise ValueError('A custom move may contain at most 64 steps and 240 frames.')
+        return tuple(Step(2,directions[n]) for n in path[:-1])+(Step(1,directions[path[-1]]+tuple(buttons.split('+'))),)
+    if re.fullmatch(r'[1-9]+[PK]',text.strip().upper()):
+        raise ValueError('Choose a button strength, such as 41236LK or 41236HK, or use Add special move to add every available strength.')
     steps=[]
     for part in text.upper().split(','):
         fields=part.strip().split(':')

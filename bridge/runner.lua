@@ -148,8 +148,8 @@ local function read_job()
     local trials={}
     for i=2,#lines do
         local r=lines[i]
-        assert(#r==5 and r[1]:match("^[%w_-]+$"), "Bad trial")
-        local trial={id=r[1], repeats=integer(r[2],1,100), tail=integer(r[3],1,600), defense=r[4], steps={}}
+        assert((#r==5 or #r==6) and r[1]:match("^[%w_-]+$"), "Bad trial")
+        local trial={id=r[1], repeats=integer(r[2],1,100), tail=integer(r[3],1,600), defense=r[4], steps={}, checkpoint_steps=0}
         assert(trial.defense=="neutral" or trial.defense=="stand" or trial.defense=="crouch" or trial.defense=="jump", "Bad defense")
         local total=trial.tail
         for step in r[5]:gmatch("[^;]+") do
@@ -160,6 +160,16 @@ local function read_job()
             trial.steps[#trial.steps+1]={frames=duration,buttons=held}
         end
         assert(total<=1200 and #trial.steps>0, "Trial duration out of bounds")
+        if #r==6 then
+            trial.checkpoint_steps=integer(r[6],0,#trial.steps-1)
+            assert(trial.checkpoint_steps==0 or (trial.defense=="neutral" and h[4]=="turbo"), "Checkpoints require neutral search")
+            local prefix={};local i=0
+            for token in r[5]:gmatch("[^;]+") do
+                i=i+1;if i>trial.checkpoint_steps then break end
+                prefix[#prefix+1]=token
+            end
+            trial.checkpoint_key=table.concat(prefix,";")
+        end
         trials[#trials+1]=trial
     end
     assert(#trials>0 and #trials<=512, "Bad trial count")
@@ -172,7 +182,7 @@ end
 emu.registerexit(function() emu.speedmode("normal") end)
 local script_file = assert(io.open(source,"rb"))
 local script_content = script_file:read("*a"); script_file:close()
-write_atomic(dir.."ready.json",{protocol=1,rom=emu.romname(),inputs=input_names,script=source,script_content=script_content,profile_sha256=config and config.sha256 or nil})
+write_atomic(dir.."ready.json",{protocol=1,rom=emu.romname(),inputs=input_names,script=source,script_content=script_content,profile_sha256=config and config.sha256 or nil,prefix_checkpoints=type(savestate.save)=="function"})
 local last_heartbeat = 0
 local function heartbeat()
     local now = os.time()
@@ -182,6 +192,13 @@ local function heartbeat()
     end
 end
 print("ComboChan ready. Requests: " .. dir)
+local function same_values(a,b)
+    if type(a)~=type(b) then return false end
+    if type(a)~="table" then return a==b end
+    for k,v in pairs(a) do if not same_values(v,b[k]) then return false end end
+    for k in pairs(b) do if a[k]==nil then return false end end
+    return true
+end
 while true do
     heartbeat()
     local ok, job = pcall(read_job)
@@ -192,19 +209,29 @@ while true do
         emu.speedmode(job.speed)
         local path=dir..job.id..".jsonl"
         local output=assert(io.open(path..".tmp","wb"))
+        -- Cache is bounded and scoped to this request's immutable root snapshot.
+        local checkpoints,checkpoint_paths={},{}
         for _, trial in ipairs(job.trials) do
             for repetition=1,trial.repeats do
-                savestate.load(job.snapshot)
+                local cached=trial.checkpoint_steps>0 and checkpoints[trial.checkpoint_key] or nil
+                savestate.load(cached and cached.path or job.snapshot)
                 assert(emu.romname() == expected_rom, "The selected save state has the wrong ROM")
                 local trace={sample(0)}
-                local baseline=trace[1].p2.health
                 local frame = 0
+                if cached then
+                    assert(same_values(sample(cached.frame),cached.trace[#cached.trace]), "Checkpoint restoration mismatch")
+                    trace={};for _,row in ipairs(cached.trace) do trace[#trace+1]=row end
+                    frame=cached.frame
+                end
+                local baseline=trace[1].p2.health
                 -- Existing combos must face escape attempts from the first restored frame.
                 local hit_seen = trace[1].p2.stun1 ~= 0 or trace[1].p2.stun2 ~= 0
+                if cached then hit_seen=cached.hit_seen end
                 local steps={}
                 for _,s in ipairs(trial.steps) do steps[#steps+1]=s end
                 steps[#steps+1]={frames=trial.tail,buttons={}}
-                for _, step in ipairs(steps) do
+                for index, step in ipairs(steps) do
+                  if not cached or index>trial.checkpoint_steps then
                     for _=1,step.frames do
                         joypad.set(controls(step.buttons,trial.defense,hit_seen))
                         emu.frameadvance()
@@ -214,12 +241,22 @@ while true do
                         trace[#trace+1]=observation
                         if observation.p2.health<baseline then hit_seen=true end
                     end
+                    if not cached and trial.checkpoint_steps>0 and index==trial.checkpoint_steps and #checkpoint_paths<32 then
+                        local checkpoint_path=dir.."checkpoint_"..job.id.."_"..(#checkpoint_paths+1)..".fs"
+                        savestate.save(checkpoint_path)
+                        local saved=assert(io.open(checkpoint_path,"rb"), "Checkpoint save failed");saved:close()
+                        local prefix={};for _,row in ipairs(trace) do prefix[#prefix+1]=row end
+                        checkpoints[trial.checkpoint_key]={path=checkpoint_path,trace=prefix,frame=frame,hit_seen=hit_seen}
+                        checkpoint_paths[#checkpoint_paths+1]=checkpoint_path
+                    end
+                  end
                 end
-                output:write(encode({id=trial.id,repetition=repetition,defense=trial.defense,trace=trace}).."\n")
+                output:write(encode({id=trial.id,repetition=repetition,defense=trial.defense,trace=trace,checkpoint_frames=cached and cached.frame or 0}).."\n")
                 output:flush()
             end
         end
         output:close()
+        for _,checkpoint_path in ipairs(checkpoint_paths) do os.remove(checkpoint_path) end
         assert(os.rename(path..".tmp",path))
         savestate.load(job.snapshot)
         emu.speedmode("normal")

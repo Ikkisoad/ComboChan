@@ -55,7 +55,18 @@ const assert=require('node:assert/strict');
   busy=false;await page.evaluate(()=>refresh());
   await page.setViewportSize({width:390,height:844});await starter.fill('2LK2LK; 2HP');await saved();
   assert.ok(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),'Mobile page overflow');
+  await page.locator('[data-game="marvel-vs-capcom-2"]').click();await ready();
+  await page.locator('#special-notation').fill('41236K');await page.locator('#add-special').click();
+  assert.deepEqual(await page.locator('[data-name]').evaluateAll(inputs=>inputs.map(input=>input.value)),['41236LK','41236HK']);
+  await page.locator('#add-special').click();assert.equal(await page.locator('.custom-move').count(),2);
+  await starter.fill('2LK > 41236LK');await saved();await page.reload();await ready();
+  await page.locator('[data-game="marvel-vs-capcom-2"]').click();await ready();
+  assert.equal(await starter.inputValue(),'2LK > 41236LK');
+  assert.deepEqual(await page.locator('[data-sequence]').evaluateAll(inputs=>inputs.map(input=>input.value)),['41236LK','41236HK']);
+  await page.locator('#available-moves summary').click();
+  await page.locator('.custom-move').last().locator('[data-enabled]').uncheck();await saved();
+  assert.ok(!await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),'Special move controls overflow');
   assert.deepEqual(errors,[]);
   console.log('PASS: starter strings, real save/reload, search payload, disabled moves, depth validation, custom prefixes, unrestricted reset, legacy settings, busy progress, mobile layout');
- }finally{await browser.close();}
+ }finally{for(const p of browser.contexts().flatMap(c=>c.pages()))await p.unrouteAll({behavior:'ignoreErrors'});await browser.close();}
 })().catch(error=>{console.error(error);process.exitCode=1;});

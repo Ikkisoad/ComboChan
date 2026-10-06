@@ -3,8 +3,8 @@ const $ = id => document.getElementById(id);
 const busyStages = new Set(['starting','checking','model','searching','validating','replaying','stopping']);
 let token = '', currentGame = '', state = null, dirty = false, pending = false, initialized = false, offline = false;
 let resultTab='all', clearedResults=[];
-const defaults = {resources:'state',stock_cap:0,true_combo:true,policy:'heuristic',budget:600,depth:5,beam:8,seed:0,delays:[0,2,4,6,8,12,16],max_frames:180,tail:90,groups:['normals','motions','movement'],custom_moves:[],disabled_actions:[],disabled_buttons:[],starter:'',starters:[],auto_timing:true,max_delay:60,max_start_delay:0};
-const fieldMap = {'stock_cap':'stock-cap','true_combo':'true-combo','max_frames':'max-frames','auto_timing':'auto-timing','max_delay':'max-delay','max_start_delay':'max-start-delay'};
+const defaults = {resources:'state',stock_cap:0,true_combo:true,policy:'heuristic',budget:600,depth:5,beam:8,seed:0,delays:[0,2,4,6,8,12,16],max_frames:180,tail:90,groups:['normals','motions','movement'],custom_moves:[],disabled_actions:[],disabled_buttons:[],starter:'',starters:[],auto_timing:true,learn_timing:true,checkpoints:true,max_delay:60,max_start_delay:0};
+const fieldMap = {'stock_cap':'stock-cap','true_combo':'true-combo','max_frames':'max-frames','auto_timing':'auto-timing','learn_timing':'learn-timing','max_delay':'max-delay','max_start_delay':'max-start-delay'};
 function notice(message, success=false) { $('notice-text').textContent=message; $('notice').hidden=false; $('notice').classList.toggle('success',success); }
 function hideNotice() { $('notice').hidden=true; }
 async function api(path, data, retry=true) {
@@ -88,6 +88,7 @@ function chooseGame(id) {
   document.querySelector('.rule-toggle p').textContent=game.combo_validated===false?'True-combo verification is unavailable until hitstun is calibrated. Defensive replay checks still run for MVC2.':'Reject recovery gaps and test guard / jump escapes.';
   $('start').replaceChildren(document.createTextNode(game.combo_validated===false?'Start damage search ':'Start combo search '),el('span','→'));
   $('add-lilith').hidden=id!=='vampire-savior';
+  $('special-notation').value='';
   $('edit-game-profile').hidden=!state.game_definitions?.[id];
   $('input-groups').replaceChildren(...game.groups.map(group=>{
     const label=el('label',undefined,'group-option'), input=el('input'); input.type='checkbox'; input.dataset.group=group.id;
@@ -109,10 +110,15 @@ function chooseGame(id) {
 function renderControls() {
   if(!state || !currentGame) return;
   const connection=state.connections[currentGame], busy=busyStages.has(state.job.stage), pathsChanged=changedPaths();
+  const emulators=state.emulators?.[currentGame]||{owned:0,close_requested:0};
   const blocked=offline||pending||busy;
-  for(const id of ['prepare','save','reset-rules','add-move','add-lilith']) $(id).disabled=blocked;
+  for(const id of ['prepare','save','reset-rules','add-move','add-lilith','add-special','special-notation']) $(id).disabled=blocked;
   document.querySelectorAll('[data-pick]').forEach(b=>b.disabled=blocked);
   $('launch').disabled=blocked||!connection.prepared||connection.connected||pathsChanged;
+  $('close-emulators').disabled=offline||pending||busy||emulators.owned===0;
+  $('close-emulators').textContent=`Close emulators${emulators.owned?` (${emulators.owned})`:''}`;
+  $('close-emulators').title=busy?'Wait for the active batch to finish, or stop the job and wait for it to end.':emulators.owned?`Send a graceful close request to ${emulators.owned} dashboard-launched emulator(s).`:'No dashboard-launched emulators are running for this game.';
+  $('emulator-status').textContent=busy?`Active job: Stop finishes the current batch. Close emulators after the job ends. ${emulators.owned} dashboard-launched emulator(s) running.`:emulators.owned?`${emulators.close_requested} close request(s) sent; ${emulators.owned} dashboard-launched emulator(s) still running.`:'No dashboard-launched emulators running for this game.';
   const game=state.games.find(g=>g.id===currentGame);
   const disconnected=game.connection_steps?'Launch the isolated Flycast session and keep its menus closed.':'Launch the emulator or load the prepared script, then unpause the game, close menus, and disable Misc → Options → Auto pause.';
   const reason=offline?'Dashboard is offline. Restart Start Dashboard.cmd, then refresh this page.':pending?'Please wait for the current request to finish.':busy?'An experiment is active. Wait for it to finish or stop it first.':pathsChanged?'Emulator count or paths changed. Click Prepare session to connect this setup.':!connection.prepared?'Select an emulator and save state, then click Prepare session.':!connection.connected?disconnected:connection.pending?'The runner has an unfinished request. Let it finish; if it was interrupted, prepare a new session.':'';
@@ -214,6 +220,27 @@ function addCustomMove(move={name:'New move',sequence:'LP',enabled:true}) {
   row.append(enabled,name,sequence,remove);$('custom-moves').append(row);
 }
 $('add-move').addEventListener('click',()=>{addCustomMove();markDirty()});
+$('add-special').addEventListener('click',()=>{
+  const notation=$('special-notation').value.trim().toUpperCase(),match=/^([1-9]{1,64})(LP|MP|HP|LK|MK|HK|P|K)$/.exec(notation);
+  if(!match){notice('Enter a numpad motion and button, such as 41236K or 41236LK.');return;}
+  const game=state.games.find(game=>game.id===currentGame),[_,motion,suffix]=match;
+  const buttons=(game.buttons||[]).filter(button=>suffix.length===1?button.endsWith(suffix):button===suffix);
+  if(!buttons.length){notice('That button is unavailable in this game. Choose one of the buttons listed below.');return;}
+  const rows=[...document.querySelectorAll('.custom-move')],names=buttons.map(button=>motion+button);
+  const additions=names.filter(name=>!rows.some(row=>row.querySelector('[data-name]').value.trim().toUpperCase()===name)&&!game.moves.some(move=>move.name===name));
+  if(rows.length+additions.length>32){notice('Use at most 32 custom moves. Remove a move before adding more.');return;}
+  for(const name of names){
+    const existing=rows.find(row=>row.querySelector('[data-name]').value.trim().toUpperCase()===name);
+    const builtIn=game.moves.find(move=>move.name===name);
+    if(existing)existing.querySelector('[data-enabled]').checked=true;
+    else if(builtIn){
+      document.querySelectorAll('[data-move]').forEach(input=>{if(input.dataset.move===name)input.checked=true;});
+      document.querySelectorAll('[data-group]').forEach(input=>{if(input.dataset.group===builtIn.group)input.checked=true;});
+    }else addCustomMove({name,sequence:name,enabled:true});
+  }
+  document.querySelectorAll('[data-search-button]').forEach(input=>{if(buttons.includes(input.dataset.searchButton))input.checked=true;});
+  $('available-moves').open=true;markDirty();notice(`Available: ${names.join(', ')}. You can also use these names in Search starters. Save settings to keep them.`,true);
+});
 $('add-lilith').addEventListener('click',()=>{
   const names=[...document.querySelectorAll('[data-name]')].map(input=>input.value);
   let name='Lilith demon';let suffix=2;while(names.includes(name))name='Lilith demon '+suffix++;
@@ -243,6 +270,7 @@ $('connection-help-button').addEventListener('click',()=>{$('connect-help').open
 $('prepare').addEventListener('click',()=>perform(async()=>{await api('/api/prepare',setupData());dirty=false;$('save-state').textContent='Settings saved locally';$('connect-help').open=true;notice(state.games.find(g=>g.id===currentGame).connection_steps?'Session prepared. Launch the isolated Flycast emulator.':'Session prepared. Launch the selected emulators, or load each runner’s own script in a separate window.',true)}));
 $('script-instance').addEventListener('change',()=>{const items=state.connections[currentGame].instances||[];$('script-path').value=items[Number($('script-instance').value)]?.script||'';});
 $('launch').addEventListener('click',()=>perform(async()=>{const result=await api('/api/launch',{game:currentGame});notice(result.message,true)}));
+$('close-emulators').addEventListener('click',()=>perform(async()=>{const result=await api('/api/emulators/close',{game:currentGame});notice(result.message,true)}));
 $('start').addEventListener('click',()=>perform(async()=>{await api('/api/start',{game:currentGame,action:'search',rules:readRules()})}));
 $('check').addEventListener('click',()=>perform(async()=>{await api('/api/start',{game:currentGame,action:'check',rules:readRules()})}));
 $('stop').addEventListener('click',()=>perform(async()=>{await api('/api/stop',{})}));

@@ -24,7 +24,7 @@ ROOT=Path(__file__).resolve().parents[1]
 DEFAULT_RULES={'resources':'state','stock_cap':0,'true_combo':True,'policy':'heuristic',
                'budget':600,'depth':5,'beam':8,'seed':0,'delays':[0,2,4,6,8,12,16],
                'custom_moves':[],'disabled_actions':[],'disabled_buttons':[],'starter':'','starters':[],
-               'auto_timing':True,'max_delay':60,'max_start_delay':0,
+               'auto_timing':True,'learn_timing':True,'checkpoints':True,'max_delay':60,'max_start_delay':0,
                'max_frames':180,'tail':90,'groups':['normals','motions','movement']}
 BUSY={'starting','checking','model','searching','validating','replaying','stopping'}
 
@@ -32,7 +32,7 @@ BUSY={'starting','checking','model','searching','validating','replaying','stoppi
 def validate_rules(data,game):
     if not isinstance(data,dict): raise ValueError('Rules must be an object.')
     rules={**DEFAULT_RULES,'groups':[g['id'] for g in game.groups],**data}
-    bounds={'budget':(24,5000),'depth':(1,8),'beam':(1,32),'seed':(0,2147483647),
+    bounds={'budget':(24,5000),'depth':(1,64),'beam':(1,32),'seed':(0,2147483647),
             'max_start_delay':(0,120),'max_delay':(0,120),'max_frames':(1,960),'tail':(10,600),'stock_cap':(0,99)}
     for key,(low,high) in bounds.items():
         if type(rules[key]) is not int or not low<=rules[key]<=high:
@@ -48,6 +48,8 @@ def validate_rules(data,game):
         raise ValueError('Select at least one supported input group.')
     rules['custom_moves']=validate_custom_moves(rules['custom_moves'])
     if type(rules['auto_timing']) is not bool: raise ValueError('Automatic timing must be a boolean.')
+    if type(rules['checkpoints']) is not bool: raise ValueError('Checkpoints must be a boolean.')
+    if type(rules['learn_timing']) is not bool: raise ValueError('Learn timing must be a boolean.')
     disabled=rules['disabled_actions']
     names={a.name for a in game.actions([g['id'] for g in game.groups])}
     if not isinstance(disabled,list) or any(not isinstance(n,str) or n not in names for n in disabled):
@@ -101,6 +103,7 @@ class Dashboard:
         self.process=None
         self.owned_emulators=[]
         self.emulator_sessions={}
+        self.emulator_close_requested=set()
 
     def profile(self,game_id):
         game=get_game(game_id)
@@ -149,6 +152,67 @@ class Dashboard:
 
     def idle(self):
         if self.job['stage'] in BUSY: raise ValueError('A job is active. Stop it or wait for it to finish first.')
+
+    def refresh_emulators(self):
+        """Drop only handles known to have exited; uncertain handles stay owned."""
+        live=[]
+        for process in self.owned_emulators:
+            try: exited=process.poll() is not None
+            except Exception: exited=False
+            if exited: self.emulator_close_requested.discard(id(process))
+            else: live.append(process)
+        self.owned_emulators=live
+        owned={id(process) for process in live}
+        self.emulator_sessions={session:process for session,process in self.emulator_sessions.items()
+                                if id(process) in owned}
+
+    def _session_game(self,session):
+        try:
+            path=Path(session).resolve()
+            if not path.is_relative_to((self.data/'sessions').resolve()): return None
+            return (read_json(path/'session.json',{}) or {}).get('game')
+        except (OSError,ValueError):
+            return None
+
+    def emulator_status(self,game_id):
+        self.refresh_emulators()
+        entries=[(process,id(process) in self.emulator_close_requested)
+                 for session,process in self.emulator_sessions.items()
+                 if self._session_game(session)==game_id]
+        return {'owned':len(entries),'close_requested':sum(requested for _,requested in entries)}
+
+    def close_emulators(self,game_id):
+        with self.lock:
+            self.idle()
+            get_game(game_id)
+            self.refresh_emulators()
+            owned={id(process) for process in self.owned_emulators}
+            selected=[]; seen=set()
+            for session,process in self.emulator_sessions.items():
+                if id(process) in owned and id(process) not in seen and self._session_game(session)==game_id:
+                    selected.append(process); seen.add(id(process))
+            requested=failed=0
+            for process in selected:
+                identity=id(process)
+                if identity in self.emulator_close_requested: continue
+                try:
+                    if os.name=='nt':
+                        sent=process.close_gracefully()
+                        if sent==0 and process.poll() is None:
+                            raise RuntimeError('No emulator window accepted a close request; retry after closing menus or dialogs.')
+                    else: process.terminate()
+                    self.emulator_close_requested.add(identity)
+                    requested+=1
+                except Exception: failed+=1
+            self.refresh_emulators()
+            pending=self.emulator_status(game_id)['owned']
+            if not selected: message='No dashboard-launched emulators are running for this game.'
+            elif requested:
+                message=f'Sent a graceful close request to {requested} emulator(s); {pending} are still running.'
+                if failed: message+=f' {failed} close request(s) failed; ownership is retained.'
+            elif failed: message=f'{failed} close request(s) failed; ownership is retained.'
+            else: message=f'Close already requested; {pending} emulator(s) are still running.'
+            return {'game':game_id,'requested':requested,'pending':pending,'failed':failed,'message':message}
 
     def session(self,game_id):
         value=self.profile(game_id).get('session')
@@ -248,10 +312,12 @@ class Dashboard:
 
     def status(self):
         with self.lock:
+            emulators={g:self.emulator_status(g) for g in GAMES}
             return {'games':[g.public() for g in GAMES.values()],
                     'game_definitions':{g.id:{'definition':g.definition,'sha256':g.profile_sha256} for g in GAMES.values() if hasattr(g,'definition')},
                     'profiles':{g:self.profile(g) for g in GAMES},
-                    'connections':{g:self.connection(g) for g in GAMES},'job':dict(self.job),'history':self.history(),
+                    'connections':{g:self.connection(g) for g in GAMES},'emulators':emulators,
+                    'job':dict(self.job),'history':self.history(),
                     'model_available':(self.root/'models/laya/combochan-model.json').exists()}
 
     def save(self,data):
@@ -329,7 +395,7 @@ class Dashboard:
             game=get_game(game_id)
             exe=Path(self.profile(game_id)['emulator'])
             if not exe.is_file() or exe.name.lower() not in game.executable_names: raise ValueError('Emulator path is invalid.')
-            self.owned_emulators=[p for p in self.owned_emulators if p.poll() is None]
+            self.refresh_emulators()
             launched=0
             for session,connection in zip(self.sessions(game_id),self.connection(game_id)['instances']):
                 process=self.emulator_sessions.get(str(session))
@@ -478,6 +544,7 @@ class Handler(BaseHTTPRequestHandler):
                 result={'valid':True,'profile_sha256':game.profile_sha256}
             elif path=='/api/prepare': result=app.prepare(data)
             elif path=='/api/launch': result=app.launch(data['game'])
+            elif path=='/api/emulators/close': result=app.close_emulators(data['game'])
             elif path=='/api/start': result=app.start(data)
             elif path=='/api/stop': result=app.stop()
             elif path=='/api/results/favorite': result=app.favorite(data)

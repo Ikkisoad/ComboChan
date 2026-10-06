@@ -260,7 +260,87 @@ class XMenVsStreetFighter(VampireSavior):
         return 'COMBOCHAN_GAME = '+lua_value({**self.telemetry,'sha256':self.profile_sha256})+'\n'
 
 
-GAMES = {game.id: game for game in (VampireSavior(), MarvelVsCapcom2(), ThirdStrike(), XMenVsStreetFighter())}
+class MarvelVsCapcom(VampireSavior):
+    id = 'marvel-vs-capcom'
+    title = 'Marvel vs. Capcom'
+    subtitle = 'Clash of Super Heroes'
+    rom = 'mvsc'
+    badge = 'MC'
+    vsav_ordering = False
+    combo_validated = True
+    escape_checks = True
+    default_snapshot = 'G:/Games/Fightcade/emulator/fbneo/savestates/mvsc slot 01.fs'
+
+    def __init__(self):
+        import hashlib
+        import json
+        inputs = {code: {p: p.upper()+' '+name for p in ('p1','p2')}
+                  for code, name in [('U','Up'),('D','Down'),('L','Left'),('R','Right'),
+                                     ('LP','Weak Punch'),('MP','Medium Punch'),('HP','Strong Punch'),
+                                     ('LK','Weak Kick'),('MK','Medium Kick'),('HK','Strong Kick')]}
+        players = {}
+        # Installed training-mode games/mvc/mvc.lua and marvel-hitboxes.lua.
+        # The opponent object's dealt-hit counter is our received-hit counter.
+        for p, base, counter in (('p1',0xFF3000,0xFF3520),('p2',0xFF3400,0xFF3120)):
+            fields = {name: {'address':base+offset,'type':kind} for name,offset,kind in (
+                ('health',0x271,'u8'),('stocks',0x274,'u8'),
+                ('x',0x0C,'s16'),('y',0x10,'s16'),('facing',0x4B,'u8'),
+                ('state',0x06,'u16'),('character_id',0x52,'u16'),
+                ('active_character',0x280,'u8'))}
+            fields['stun1'] = {'address':counter,'type':'u8'}
+            fields['combo_hits'] = {'address':counter,'type':'u8'}
+            players[p] = fields
+        self.telemetry = {'rom':self.rom,'inputs':inputs,'players':players}
+        self.profile_sha256 = hashlib.sha256(json.dumps(self.telemetry,sort_keys=True).encode()).hexdigest()
+
+    def public(self):
+        value = super().public()
+        value.update(combo_validated=self.combo_validated,
+                     limits='Euro 980123 (mvsc). Point-character health and received-hit counters, calibrated on Venom against Spider-Man. Generic normals, motions, hypers and super jumps. Tag, assist and team inputs are unsupported. Defensive replay checks conservatively reject damage variations.')
+        return value
+
+    def actions(self, groups):
+        actions = super().actions(groups)
+        if 'movement' in groups:
+            actions.extend([Action('super jump',(Step(1,('D',)),Step(8,('U',))),'movement'),
+                            Action('super jump forward',(Step(1,('D',)),Step(8,('U','F'))),'movement')])
+        return actions
+
+    def validate_initial(self, state):
+        if not all(0 <= state[p]['health'] <= 144 for p in ('p1','p2')):
+            raise ValueError('Marvel vs. Capcom health telemetry is outside 0-144.')
+
+    def validate_rules(self, rules):
+        super().validate_rules(rules)
+        for action in self.search_actions(rules):
+            if any(set(step.buttons) & {'LP','MP','HP'} and set(step.buttons) & {'LK','MK','HK'}
+                   for step in action.steps):
+                raise ValueError('Marvel vs. Capcom tag and assist inputs are not calibrated; mixed punch/kick presses are unsupported.')
+        if rules['true_combo'] and not self.combo_validated:
+            raise ValueError('Marvel vs. Capcom true-combo verification requires live counter and defensive calibration.')
+
+    def landing_delays(self, trace, end_frame, limit):
+        return []
+
+    def score(self, record, rules):
+        self.validate_rules(rules)
+        for row in record['trace']:
+            self.validate_initial(row)
+        result = super().score(record, rules)
+        initial = record['trace'][0]
+        if any(row[p]['character_id'] != initial[p]['character_id']
+               or row[p]['active_character'] != initial[p]['active_character']
+               for row in record['trace'] for p in ('p1','p2')):
+            result['candidate_valid'] = False
+            result['rejection_reasons'].append('tag_or_character_transition')
+        return result
+
+    def session_script(self):
+        from .game_profile import lua_value
+        return 'COMBOCHAN_GAME = '+lua_value({**self.telemetry,'sha256':self.profile_sha256})+'\n'
+
+
+GAMES = {game.id: game for game in (VampireSavior(), MarvelVsCapcom2(), ThirdStrike(), XMenVsStreetFighter(), MarvelVsCapcom())}
 
 
 def get_game(game_id):
