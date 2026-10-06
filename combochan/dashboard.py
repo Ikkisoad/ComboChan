@@ -100,12 +100,13 @@ class Dashboard:
         self.job={'stage':'idle','message':'Prepare a session to get started.','completed':0}
         self.process=None
         self.owned_emulators=[]
+        self.emulator_sessions={}
 
     def profile(self,game_id):
         game=get_game(game_id)
         default_exe=Path(getattr(game,'default_executable','G:/Games/Fightcade/emulator/fbneo/fcadefbneo.exe'))
         default_state=Path(getattr(game,'default_snapshot','G:/Games/Fightcade/emulator/fbneo/savestates/vsavj slot 01.fs'))
-        value={ 'emulator':str(default_exe) if default_exe.exists() else '',
+        value={ 'instance_count':1, 'emulator':str(default_exe) if default_exe.exists() else '',
                  'snapshot':str(default_state) if (game.id=='vampire-savior' or hasattr(game,'default_snapshot')) and default_state.exists() else '',
                  'rules':{**DEFAULT_RULES,'groups':[g['id'] for g in game.groups],
                           'true_combo':getattr(game,'definition',{}).get('combo_validated',getattr(game,'combo_validated',True))},**self.config.get(game.id,{})}
@@ -159,17 +160,29 @@ class Dashboard:
             raise ValueError('Game profile changed. Prepare a new session.')
         return path
 
+    def sessions(self,game_id):
+        session=self.session(game_id)
+        count=read_json(session/'session.json',{}).get('instance_count',1)
+        return [session]+[session/f'instance-{i}' for i in range(2,count+1)]
+
     def connection(self,game_id):
         try:
             session=self.session(game_id)
-            heartbeat=read_json(session/'bridge/heartbeat.json',{}) or {}
-            ready=read_json(session/'bridge/ready.json',{}) or {}
-            age=time.time()-heartbeat.get('time',0)
-            connected=0<=age<6 and ready.get('rom')==get_game(game_id).rom
             expected=getattr(get_game(game_id),'profile_sha256',None)
-            if expected: connected=connected and ready.get('profile_sha256')==expected
-            return {'connected':connected,'prepared':True,'label':'Runner connected' if connected else 'Waiting for runner',
-                    'script':str(session/'connect.lua'),'pending':(session/'bridge/request.tsv').exists(),
+            instances=[]
+            for path in self.sessions(game_id):
+                heartbeat=read_json(path/'bridge/heartbeat.json',{}) or {}
+                ready=read_json(path/'bridge/ready.json',{}) or {}
+                age=time.time()-heartbeat.get('time',0)
+                connected=0<=age<6 and ready.get('rom')==get_game(game_id).rom
+                if expected: connected=connected and ready.get('profile_sha256')==expected
+                instances.append({'connected':connected,'script':str(path/'connect.lua'),
+                                  'pending':any((path/'bridge'/name).exists() for name in ('request.tsv','client.lock'))})
+            connected=all(item['connected'] for item in instances)
+            count=sum(item['connected'] for item in instances)
+            label=('Runner connected' if connected else 'Waiting for runner') if len(instances)==1 else f'{count}/{len(instances)} runners connected'
+            return {'connected':connected,'prepared':True,'label':label,'instances':instances,
+                    'script':str(session/'connect.lua'),'pending':any(item['pending'] for item in instances),
                     'snapshot_sha256':read_json(session/'session.json',{}).get('snapshot_sha256'),
                     'snapshot_hashes':[s['snapshot_sha256'] for s in read_json(session/'session.json',{}).get('snapshots',[])] or [read_json(session/'session.json',{}).get('snapshot_sha256')]}
         except ValueError:
@@ -255,9 +268,13 @@ class Dashboard:
                 raise ValueError('Provide 1-100 save-state paths.')
             profile['snapshots']=[p.strip().strip(chr(34)) for p in snapshots]
             profile['snapshot']=profile['snapshots'][0]
+            count=data.get('instance_count',profile['instance_count'])
+            if type(count) is not int or not 1<=count<=16:
+                raise ValueError('Emulator instances must be an integer between 1 and 16.')
+            profile['instance_count']=count
             profile['rules']=validate_rules(data.get('rules',profile['rules']),game)
             old=self.profile(game.id)
-            if profile['emulator']!=old['emulator'] or profile['snapshots']!=old.get('snapshots',[old['snapshot']]):
+            if profile['emulator']!=old['emulator'] or profile['snapshots']!=old.get('snapshots',[old['snapshot']]) or count!=old['instance_count']:
                 profile.pop('session',None)
             self.config[game.id]=profile
             atomic_json(self.data/'config.json',self.config)
@@ -267,7 +284,7 @@ class Dashboard:
         with self.lock:
             profile=self.save(data)
             game=get_game(data['game'])
-            exe=Path(profile['emulator']); snapshot=Path(profile['snapshot'])
+            exe=Path(profile['emulator'])
             if not exe.is_file() or exe.name.lower() not in game.executable_names:
                 raise ValueError('Select the '+game.emulator_name+' executable ('+', '.join(game.executable_names)+').')
             for source in profile['snapshots']:
@@ -275,56 +292,68 @@ class Dashboard:
                 if not state.is_file() or state.suffix.lower() not in game.state_extensions: raise ValueError('Select an existing '+', '.join(game.state_extensions)+' save state: '+source)
                 if state.stat().st_size>64*1024*1024: raise ValueError('Save state exceeds the supported 64 MB limit: '+source)
             session=self.data/'sessions'/uuid.uuid4().hex
-            (session/'bridge').mkdir(parents=True)
-            snapshots=[]
-            for index,source in enumerate(profile['snapshots']):
-                extension=game.state_extensions[0]
-                filename='root'+extension if index==0 else f'state_{index+1}'+extension
-                target=session/'bridge'/filename
-                shutil.copy2(source,target)
-                snapshots.append({'file':filename,'source':source,'snapshot_sha256':hashlib.sha256(target.read_bytes()).hexdigest()})
-            digest=snapshots[0]['snapshot_sha256']
-            # JSON quoting with ASCII paths is valid Lua; use decimal escapes for non-ASCII UTF-8.
-            def lua_string(value):
-                return '"'+''.join(chr(b) if 32<=b<127 and b not in (34,92) else '\\%03d'%b for b in value.encode('utf-8'))+'"'
-            script='COMBOCHAN_BRIDGE_DIR = '+lua_string((session/'bridge').as_posix()+'/')+'\n'
-            if hasattr(game,'session_script'):
-                script+=game.session_script()
-                if hasattr(game,'definition'): atomic_json(session/'game-profile.json',game.definition)
-            else: script+='COMBOCHAN_GAME = nil\n'
-            if hasattr(game,'prepare_runtime'): game.prepare_runtime(exe,session,snapshots)
-            script+='return assert(loadfile('+lua_string((self.root/game.runner_path).as_posix())+'))()\n'
-            (session/'connect.lua').write_text(script,encoding='ascii')
-            atomic_json(session/'session.json',{'game':game.id,'source':str(snapshot),'snapshot_sha256':digest,'snapshots':snapshots,'created':time.time(),'profile_sha256':getattr(game,'profile_sha256',None)})
+            for index in range(1,profile['instance_count']+1):
+                path=session if index==1 else session/f'instance-{index}'
+                self.prepare_instance(game,exe,path,profile)
             profile['session']=str(session)
             self.config[game.id]=profile
             atomic_json(self.data/'config.json',self.config)
-            return {'script':str(session/'connect.lua'),'snapshot_sha256':digest}
+            return {'script':str(session/'connect.lua'),'snapshot_sha256':read_json(session/'session.json')['snapshot_sha256']}
+
+    def prepare_instance(self,game,exe,session,profile):
+        (session/'bridge').mkdir(parents=True)
+        snapshots=[]
+        for index,source in enumerate(profile['snapshots']):
+            extension=game.state_extensions[0]
+            filename='root'+extension if index==0 else f'state_{index+1}'+extension
+            target=session/'bridge'/filename
+            shutil.copy2(source,target)
+            snapshots.append({'file':filename,'source':source,'snapshot_sha256':hashlib.sha256(target.read_bytes()).hexdigest()})
+        digest=snapshots[0]['snapshot_sha256']
+        # JSON quoting with ASCII paths is valid Lua; use decimal escapes for non-ASCII UTF-8.
+        def lua_string(value):
+            return '"'+''.join(chr(b) if 32<=b<127 and b not in (34,92) else '\\%03d'%b for b in value.encode('utf-8'))+'"'
+        script='COMBOCHAN_BRIDGE_DIR = '+lua_string((session/'bridge').as_posix()+'/')+'\n'
+        if hasattr(game,'session_script'):
+            script+=game.session_script()
+            if hasattr(game,'definition'): atomic_json(session/'game-profile.json',game.definition)
+        else: script+='COMBOCHAN_GAME = nil\n'
+        if hasattr(game,'prepare_runtime'): game.prepare_runtime(exe,session,snapshots)
+        script+='return assert(loadfile('+lua_string((self.root/game.runner_path).as_posix())+'))()\n'
+        (session/'connect.lua').write_text(script,encoding='ascii')
+        atomic_json(session/'session.json',{'game':game.id,'source':profile['snapshot'],'snapshot_sha256':digest,'snapshots':snapshots,'created':time.time(),'profile_sha256':getattr(game,'profile_sha256',None),'instance_count':profile['instance_count']})
 
     def launch(self,game_id):
         with self.lock:
             self.idle()
-            game=get_game(game_id); session=self.session(game_id)
+            game=get_game(game_id)
             exe=Path(self.profile(game_id)['emulator'])
             if not exe.is_file() or exe.name.lower() not in game.executable_names: raise ValueError('Emulator path is invalid.')
-            if self.connection(game_id)['connected']: raise ValueError('The runner is already connected.')
             self.owned_emulators=[p for p in self.owned_emulators if p.poll() is None]
-            if self.owned_emulators: raise ValueError('The dashboard already opened an emulator. Load the session script there or close it before launching another.')
-            arguments=game.launch_arguments(exe,session/'connect.lua')
-            if os.name == 'nt':
-                from .windows_launch import launch_visible
-                process=launch_visible(arguments,Path(arguments[0]).parent)
-            else:
-                process=subprocess.Popen(arguments,cwd=Path(arguments[0]).parent)
-            self.owned_emulators.append(process)
-            return {'message':getattr(game,'launch_message','Emulator launched. If it does not connect, load the prepared Lua script using the instructions below.')}
+            launched=0
+            for session,connection in zip(self.sessions(game_id),self.connection(game_id)['instances']):
+                process=self.emulator_sessions.get(str(session))
+                if connection['connected'] or (process is not None and process.poll() is None): continue
+                arguments=game.launch_arguments(exe,session/'connect.lua')
+                try:
+                    if os.name == 'nt':
+                        from .windows_launch import launch_visible
+                        process=launch_visible(arguments,Path(arguments[0]).parent)
+                    else:
+                        process=subprocess.Popen(arguments,cwd=Path(arguments[0]).parent)
+                except OSError as exc:
+                    raise ValueError(f'Launched {launched} new emulator(s), then launching another failed: {exc}. Retry to open the missing instances.') from exc
+                self.owned_emulators.append(process)
+                self.emulator_sessions[str(session)]=process
+                launched+=1
+            return {'launched':launched,'message':f'Launched {launched} emulator(s). Keep every window unpaused with Auto pause disabled. If a runner does not connect, load its own prepared script using the instructions below.'}
 
     def start(self,data):
         with self.lock:
             self.idle()
             game=get_game(data['game']); session=self.session(game.id)
             if not self.connection(game.id)['connected']: raise ValueError('Connect and unpause the prepared Lua runner first.')
-            if (session/'bridge/request.tsv').exists() or (session/'bridge/client.lock').exists():
+            if self.connection(game.id)['pending']:
                 raise ValueError('This session has an unfinished request. Let it finish or prepare a new session.')
             action=data.get('action','search')
             if action not in ('search','check','replay'): raise ValueError('Unknown action.')
@@ -333,6 +362,7 @@ class Dashboard:
                 raise ValueError('Laya weights are not installed. Use the CLI model-download command or select another policy.')
             run_id=uuid.uuid4().hex
             config={'game':game.id,'session':str(session),'rules':rules,'action':action,'model':str(self.root/'models/laya')}
+            config['sessions']=[str(path) for path in self.sessions(game.id)]
             prepared=read_json(session/'session.json',{})
             config['snapshots']=prepared.get('snapshots',[{'file':'root.fs','source':prepared.get('source',''),'snapshot_sha256':prepared['snapshot_sha256']}])
             if hasattr(game,'definition'): config['game_profile']=game.definition

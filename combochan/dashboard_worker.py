@@ -6,7 +6,7 @@ import json
 import sys
 import time
 
-from .bridge import Bridge, Step, Trial
+from .bridge import Bridge, BridgePool, Step, Trial
 from .evaluate import repeatability
 from .games import get_game
 from .moves import parse_starter
@@ -144,8 +144,11 @@ def execute(config, emit_event=emit):
     else:
         game=get_game(config['game'])
     session=Path(config['session'])
+    sessions=[Path(path) for path in config.get('sessions',[str(session)])]
+    if config['action']=='replay': sessions=[session]
     snapshot_file=config.get('snapshot_file','root'+game.state_extensions[0])
-    bridge=Bridge(session/'bridge',timeout=getattr(game,'bridge_timeout',120),rom=game.rom,snapshot=snapshot_file)
+    bridges=[Bridge(path/'bridge',timeout=getattr(game,'bridge_timeout',120),rom=game.rom,snapshot=snapshot_file) for path in sessions]
+    bridge=BridgePool(bridges) if len(bridges)>1 else bridges[0]
     rules=config['rules']
     if hasattr(game,'validate_rules'): game.validate_rules(rules)
     snapshot_hash=hashlib.sha256((session/'bridge'/snapshot_file).read_bytes()).hexdigest()
@@ -155,13 +158,16 @@ def execute(config, emit_event=emit):
     def run(trials, speed='turbo'):
         check_cancel()
         return bridge.run(trials,speed)
-    ready=json.loads((session/'bridge/ready.json').read_text(encoding='utf-8'))
     current_script=Path(__file__).resolve().parents[1]/game.runner_path
-    if ready.get('script_content') != current_script.read_bytes().decode('utf-8'):
-        raise RuntimeError('The loaded Lua runner is outdated. Stop it and load the prepared session script again.')
     profile_hash=getattr(game,'profile_sha256',None)
-    if profile_hash and ready.get('profile_sha256')!=profile_hash:
-        raise RuntimeError('The loaded game profile changed. Prepare and connect a new session.')
+    for path in sessions:
+        ready=json.loads((path/'bridge/ready.json').read_text(encoding='utf-8'))
+        if ready.get('script_content') != current_script.read_bytes().decode('utf-8'):
+            raise RuntimeError('The loaded Lua runner is outdated. Stop it and load the prepared session script again.')
+        if profile_hash and ready.get('profile_sha256')!=profile_hash:
+            raise RuntimeError('The loaded game profile changed. Prepare and connect a new session.')
+        if hashlib.sha256((path/'bridge'/snapshot_file).read_bytes()).hexdigest()!=snapshot_hash:
+            raise RuntimeError('Emulator instances have different save states. Prepare a new session.')
     if config['action']=='replay':
         replay=config['replay']
         if replay.get('profile_sha256')!=profile_hash and not (hasattr(game,'replay_compatible') and game.replay_compatible(replay)):
@@ -172,13 +178,15 @@ def execute(config, emit_event=emit):
         records,manifest=run([Trial('replay',steps,tail=replay['tail'])],speed='normal')
         emit_event(stage='complete',message='Replay finished.',result={'replay':True,'manifest':manifest})
         return
-    emit_event(stage='checking',message='Checking that this save state replays consistently (100 runs).',completed=0)
+    emit_event(stage='checking',message=f'Checking that this save state replays consistently (100 runs per emulator, {len(bridges)} instance(s)).',completed=0)
     # A neutral trace works for arbitrary snapshots, including mid-combo or airborne states.
     # It tests restoration, not whether a canned starter can hit from this position.
-    records,manifest=run([Trial('restore',(Step(1),),tail=max(30,rules.get('max_delay',60)),repeats=100)])
+    restoration=[Trial('restore',(Step(1),),tail=max(30,rules.get('max_delay',60)),repeats=100)]
+    check_cancel()
+    records,manifest=bridge.run_all(restoration) if len(bridges)>1 else run(restoration)
     checks=repeatability(records)
-    if not all(g['identical'] and g['runs']==100 for g in checks.values()):
-        raise RuntimeError('This snapshot did not produce 100 identical traces. Search stopped.')
+    if not all(g['identical'] and g['runs']==100*len(bridges) for g in checks.values()):
+        raise RuntimeError('This snapshot did not produce 100 identical traces per emulator, matching across all instances. Search stopped.')
     initial=records[0]['trace'][0]
     game.validate_initial(initial)
     stun=(initial['p2']['stun1'],initial['p2']['stun2'])
@@ -186,7 +194,7 @@ def execute(config, emit_event=emit):
     gate={'manifest':manifest,'repeatability':checks,'initial_state':initial}
     (session/(snapshot_file+'.verify.json' if snapshot_file!='root.fs' else 'verify.json')).write_text(json.dumps(gate,indent=2),encoding='utf-8')
     if config['action']=='check':
-        emit_event(stage='complete',message='100/100 restoration traces matched.',result={'check':True,**gate})
+        emit_event(stage='complete',message=f'{100*len(bridges)}/{100*len(bridges)} restoration traces matched across {len(bridges)} emulator(s).',result={'check':True,**gate})
         return
     check_cancel()
     emit_event(stage='model',message='Loading local Laya.' if rules['policy']=='laya' else 'Preparing the search.')

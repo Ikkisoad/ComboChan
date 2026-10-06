@@ -218,7 +218,7 @@ class FlycastSessionTests(unittest.TestCase):
             before = {p: p.read_bytes() for p in install.rglob('*') if p.is_file()}
             app = Dashboard(root)
             app.prepare({'game': GAME.id, 'emulator': str(install/'flycast.exe'),
-                         'snapshots': list(map(str, states)), 'rules': RULES})
+                         'snapshots': list(map(str, states)), 'rules': RULES, 'instance_count': 2})
             session = app.session(GAME.id)
             snapshots = json.loads((session/'session.json').read_text())['snapshots']
             self.assertEqual([s['file'] for s in snapshots], ['root.state','state_2.state'])
@@ -229,6 +229,11 @@ class FlycastSessionTests(unittest.TestCase):
             args = GAME.launch_arguments(install/'flycast.exe', session/'connect.lua')
             self.assertEqual(Path(args[0]), session/'flycast/flycast.exe')
             self.assertEqual(Path(args[1]), install/'ROMs/mvsc2.zip')
+            second = app.sessions(GAME.id)[1]
+            self.assertEqual(Path(GAME.launch_arguments(install/'flycast.exe', second/'connect.lua')[0]),
+                             second/'flycast/flycast.exe')
+            self.assertIn(second.as_posix(), (second/'flycast/flycast.lua').read_text())
+            self.assertEqual((second/'bridge/state_2.state').read_bytes(), states[1].read_bytes())
             copied = (session/'flycast/emu.cfg').read_text()
             self.assertIn('Dreamcast.AutoSaveState = no', copied)
             self.assertIn('Training = no', copied)

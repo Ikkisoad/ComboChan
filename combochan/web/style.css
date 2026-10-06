@@ -23,3 +23,5 @@
 .wizard-footer{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid var(--line);padding-top:20px;margin-top:24px}
 #wizard-content .group-option{line-height:1.7}#wizard-content .group-option input{flex-shrink:0}#wizard-add-move{margin-top:16px}
 @media(max-width:600px){#game-wizard{padding:20px;max-height:94vh}.wizard-controls{grid-template-columns:1fr 1fr}.wizard-controls>.group-option{grid-column:1/-1}.wizard-memory-grid,.wizard-move{grid-template-columns:1fr}.wizard-move button{justify-self:start}.wizard-review{grid-template-columns:1fr;gap:4px}.wizard-review dd{margin-bottom:12px}#wizard-steps li{font-size:10px}.hero-tags{flex-wrap:wrap}}
+
+.instance-field{margin-top:18px;max-width:620px}.instance-field input{max-width:120px}.instance-field small{display:block;margin-top:6px}#script-instance-field{display:block;margin-bottom:12px}#script-instance-field[hidden]{display:none}#script-instance{margin-left:12px}

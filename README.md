@@ -39,7 +39,9 @@ Double-click **Start Dashboard.cmd**, or run:
 
 Open http://127.0.0.1:8790. In the Vampire Savior tab, select your FBNeo executable and `.fs` save state, click **Prepare session**, then **Launch emulator**. For an already-open emulator, expand the connection instructions and load the generated session Lua script. Stop the old training script before changing its path, disable Auto pause, and leave the game unpaused.
 
-The dashboard copies the snapshot into an isolated session. It provides search rules, heuristic/random/Laya policies, progress, cooperative stop, history, exact-input exports, and replay. A fresh runner heartbeat is required before a job can start. Every search first checks 100 repeated neutral traces. True-combo results also receive defensive replay checks.
+Set **Emulator instances** to 1–16 before preparing to run multiple emulators. Each gets isolated session files, and search batches are shared across the connected instances without increasing the trial budget. The count is saved per game.
+
+The dashboard copies the snapshot into an isolated session. It provides search rules, heuristic/random/Laya policies, progress, cooperative stop, history, exact-input exports, and replay. Every selected runner needs a fresh heartbeat before a job can start. Every search first checks 100 repeated neutral traces per emulator, including agreement across instances. True-combo results also receive defensive replay checks.
 
 See [dashboard setup and game adapter guide](docs/DASHBOARD.md).
 

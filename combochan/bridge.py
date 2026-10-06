@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import hashlib
 import json
@@ -120,3 +121,50 @@ class Bridge:
             return records, manifest
         finally:
             lock.unlink(missing_ok=True)
+
+
+class BridgePool:
+    """Execute independent trials concurrently, preserving caller order and evidence."""
+
+    def __init__(self, bridges):
+        if not bridges:
+            raise ValueError('At least one emulator bridge is required')
+        self.bridges = bridges
+
+    def _run(self, assignments, speed):
+        started = time.monotonic()
+        # Wait for every submitted batch even on failure so cancellation/failure
+        # cannot leave an untracked client writing to a session.
+        with ThreadPoolExecutor(max_workers=len(assignments)) as executor:
+            futures = [executor.submit(bridge.run, trials, speed) for bridge, trials in assignments]
+            results = [future.result() for future in futures]
+        if len(results) == 1:
+            return results[0]
+        records = [record for rows, _ in results for record in rows]
+        manifests = [manifest for _, manifest in results]
+        for key in ('snapshot_sha256', 'rom', 'profile_sha256', 'adapter_sha256'):
+            if any(m.get(key) != manifests[0].get(key) for m in manifests):
+                raise RuntimeError('Emulator instances returned different snapshot or adapter identities')
+        manifest = {key: value for key, value in manifests[0].items()
+                    if key not in ('job', 'raw_results', 'trials', 'wall_seconds')}
+        manifest.update(worker_manifests=manifests, wall_seconds=time.monotonic()-started,
+                        trials=[trial for m in manifests for trial in m['trials']])
+        return records, manifest
+
+    def run(self, trials, speed='turbo'):
+        if not 1 <= len(trials) <= 512 or len({t.id for t in trials}) != len(trials):
+            raise ValueError('Provide 1–512 uniquely named trials')
+        if speed not in ('normal', 'turbo'):
+            raise ValueError('Invalid speed')
+        for trial in trials:
+            trial.validate()
+        count = min(len(trials), len(self.bridges))
+        records, manifest = self._run([(bridge, trials[i::count])
+                                       for i, bridge in enumerate(self.bridges[:count])], speed)
+        order = {trial.id: i for i, trial in enumerate(trials)}
+        records.sort(key=lambda row: (order[row['id']], row['repetition']))
+        return records, manifest
+
+    def run_all(self, trials):
+        """Check restoration on every instance, including consistency across them."""
+        return self._run([(bridge, trials) for bridge in self.bridges], 'turbo')

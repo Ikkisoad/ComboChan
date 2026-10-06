@@ -5,12 +5,14 @@ Run `Start Dashboard.cmd` or `python -m combochan.dashboard --open` from an inst
 ## Workflow
 
 1. Select Vampire Savior, Fightcade `fcadefbneo.exe`, and a `vsavj` `.fs` snapshot.
-2. Prepare a session. This copies the snapshot; the original remains untouched.
-3. Launch a separate emulator, or use the displayed session script in an existing Lua window. Stop the training script before changing paths. Disable Auto pause and unpause.
+2. Set **Emulator instances** (1–16, saved per game), then prepare a session. Each instance gets its own snapshot copies and runner script; the originals remain untouched.
+3. Click **Launch emulator(s)** to open the selected number of windows. For manual FBNeo connections, choose each emulator in the runner-script selector and load its script in a separate window. Stop the training script before changing paths. Disable Auto pause and unpause every window.
 4. Run the connection check or start a search. The runner controls both players and reloads the copied snapshot for every trial.
 5. Review verified routes, replay against the same snapshot, or export their exact frame inputs. Stop waits for the active batch to finish.
 
 Default resources come from the snapshot. There is no refill or meter rewrite. Optional stock caps constrain measured spending. Snapshot settings do not define the whole search: input groups, timing, depth, beam width, trial budget, and frame horizon still bound exploration. Laya is optional and requires the model-download setup in the README; heuristic search works without it.
+
+Multiple emulators share each search batch concurrently; the trial budget stays the same. Save states and starters still run in queue order. All selected runners must connect before starting. Restoration checks run 100 times on every instance and must match across instances. Replay uses the first emulator. Stop waits for all active trials in the batch. More instances require more CPU and memory, and small batches may use fewer windows. Flycast receives a separate portable runtime per instance. Changing the count requires preparing a new session; close old windows when they are no longer needed. Retrying Launch opens only missing instances in the current session.
 
 Current motion templates include 236, 214 and 623 with individual or paired buttons. Movement includes walk, jump and dash. This does not exhaust character-specific specials, charge moves, air routes, defensive mechanics, or all possible sequences. KO/life transitions remain conservatively rejected. Disabling the true-combo rule permits damage strings but does not mark them verified combos. No result claims global optimality.
 
