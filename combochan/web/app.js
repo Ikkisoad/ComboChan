@@ -257,7 +257,7 @@ $('undo-clear-results').addEventListener('click',()=>perform(async()=>{await api
 $('dismiss-notice').addEventListener('click',hideNotice);
 $('resources').addEventListener('change',()=>{$('cap-field').hidden=$('resources').value!=='cap'});
 document.querySelectorAll('.rules-panel input,.rules-panel select,#emulator,#snapshot,#instance-count').forEach(input=>input.addEventListener('input',markDirty));
-$('reset-rules').addEventListener('click',()=>{const game=state.games.find(g=>g.id===currentGame);loadRules({...defaults,groups:game.groups.map(g=>g.id),true_combo:game.combo_validated??true});markDirty()});
+$('reset-rules').addEventListener('click',()=>{const game=state.games.find(g=>g.id===currentGame);loadRules({...defaults,groups:game.groups.filter(g=>g.default_enabled!==false).map(g=>g.id),true_combo:game.combo_validated??true});markDirty()});
 $('save').addEventListener('click',()=>perform(async()=>{
   $('save-state').textContent='Saving…';
   try {

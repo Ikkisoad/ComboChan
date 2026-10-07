@@ -1,4 +1,6 @@
 import json
+import ctypes
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -29,6 +31,80 @@ def damage_record():
 
 
 class FlycastScoringTests(unittest.TestCase):
+    @unittest.skipUnless(os.environ.get('COMBOCHAN_TEST_LUA51'), 'Set COMBOCHAN_TEST_LUA51 to exercise Lua point tracking')
+    def test_lua_tracks_new_point_when_original_character_returns_as_assist(self):
+        runner=(Path(__file__).resolve().parents[1]/'bridge/flycast_runner.lua').read_text(encoding='utf-8')
+        player_code=runner[runner.index('local point_slots={}'):runner.index('local function sample(frame)')]
+        script='''
+local values={}
+local JSON_NULL={}
+local memory={read8=function(a) return values[a] or 0 end,
+ read16=function(a) return values[a] or 144 end,read32f=function() return 0 end}
+local first=0x0c2d7088
+local second=first+0xb48
+values[first]=1;values[first+1]=20;values[second+1]=5
+'''+player_code+'''
+assert(player(1).slot==1)
+values[first]=0;values[second]=1
+assert(player(1).slot==2)
+values[first]=1
+local observed=player(1)
+assert(observed.slot==2 and observed.character==5 and observed.active_count==2)
+'''
+        dll=ctypes.CDLL(os.environ['COMBOCHAN_TEST_LUA51'])
+        dll.luaL_newstate.restype=ctypes.c_void_p
+        dll.luaL_openlibs.argtypes=[ctypes.c_void_p]
+        dll.luaL_loadstring.argtypes=[ctypes.c_void_p,ctypes.c_char_p]
+        dll.lua_pcall.argtypes=[ctypes.c_void_p,ctypes.c_int,ctypes.c_int,ctypes.c_int]
+        dll.lua_tolstring.argtypes=[ctypes.c_void_p,ctypes.c_int,ctypes.c_void_p]
+        dll.lua_tolstring.restype=ctypes.c_char_p
+        dll.lua_close.argtypes=[ctypes.c_void_p]
+        state=dll.luaL_newstate()
+        try:
+            dll.luaL_openlibs(state)
+            status=dll.luaL_loadstring(state,script.encode())
+            if not status: status=dll.lua_pcall(state,0,0,0)
+            self.assertEqual(status,0,dll.lua_tolstring(state,-1,None) if status else '')
+        finally: dll.lua_close(state)
+
+    def test_tags_are_optional_and_use_simultaneous_attack_pairs(self):
+        actions={a.name:a for a in GAME.actions(['tags'])}
+        self.assertEqual(actions['Tag 1'].steps,(Step(1,('LP','LK')),))
+        self.assertEqual(actions['Tag 2'].steps,(Step(1,('HP','HK')),))
+        self.assertNotIn('tags',validate_rules({'true_combo':False},GAME)['groups'])
+        rules=validate_rules({**RULES,'groups':['tags'],'starters':['Tag 2']},GAME)
+        self.assertEqual(rules['starters'],['Tag 2'])
+        with self.assertRaisesRegex(ValueError,'Enable at least'):
+            validate_rules({**rules,'disabled_buttons':['LP','HP']},GAME)
+        self.assertEqual(GAME.trial_tail({'action_names':['Tag 1'],'steps':actions['Tag 1'].steps},RULES),240)
+
+    def test_enabled_p1_tag_accepts_same_roster_and_preserves_damage(self):
+        record=damage_record()
+        for row in record['trace']:
+            row['p1']['team_characters']=[20,5,7]
+            row['p1']['team_health']=[144,130,100]
+            if row['frame']>=4: row['p1'].update(slot=2,character=5,health=130)
+        self.assertIn('tag_or_assist',GAME.score(record,RULES)['rejection_reasons'])
+        tags={**RULES,'groups':['normals','tags']}
+        score=GAME.score(record,tags)
+        self.assertTrue(score['candidate_valid'])
+        self.assertEqual(score['damage'],3)
+        record['trace'][-1]['p1']['character']=9
+        self.assertIn('tag_or_assist',GAME.score(record,tags)['rejection_reasons'])
+
+    def test_tags_never_allow_opponent_swap_or_disable_ko_checks(self):
+        rules={**RULES,'groups':['tags']}
+        record=damage_record();record['trace'][-1]['p2'].update(slot=2,character=5)
+        self.assertIn('tag_or_assist',GAME.score(record,rules)['rejection_reasons'])
+        record=damage_record();record['trace'][-1]['p1']['team_health']=[144,0,144]
+        self.assertIn('ko_or_life_transition',GAME.score(record,rules)['rejection_reasons'])
+
+    def test_sonson_priorities_do_not_follow_a_tag(self):
+        candidates=[{'last':'LP'},{'last':'df.HP'}]
+        parent={'state':{'p1':{'character':20}},'action_names':['Tag 1']}
+        self.assertEqual(GAME.order_continuations(candidates,parent,RULES),candidates)
+        self.assertTrue(GAME.replay_compatible({'profile_sha256':GAME.assist_input_profile,'steps':[]}))
+
     def test_guard_check_rejects_missing_or_shifted_hits(self):
         reference={'candidate_valid':True,'damage_events':[{'frame':10,'damage':12},{'frame':59,'damage':12}]}
         self.assertFalse(escape_mismatch(reference,reference))

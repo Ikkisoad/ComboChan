@@ -30,7 +30,8 @@ class MarvelVsCapcom2:
     bridge_timeout = 600
     launch_message = 'Isolated Flycast launched. It loads the copied save automatically; keep its menus closed during experiments.'
     # Version binds results to the Naomi mapping and conservative scorer.
-    profile_sha256 = hashlib.sha256(b'mvc2-naomi-assists-v5-2d7088-5a4-420-34').hexdigest()
+    profile_sha256 = hashlib.sha256(b'mvc2-naomi-tags-v6-2d7088-5a4-420-34').hexdigest()
+    assist_input_profile = hashlib.sha256(b'mvc2-naomi-assists-v5-2d7088-5a4-420-34').hexdigest()
     previous_input_profiles = frozenset(hashlib.sha256(stamp).hexdigest() for stamp in (
         b'mvc2-naomi-damage-v1-2d7088-5a4-420-34',
         b'mvc2-naomi-escape-v2-2d7088-5a4-420-34'))
@@ -40,6 +41,7 @@ class MarvelVsCapcom2:
         {'id': 'movement', 'label': 'Walk, jump & dash'},
         {'id': 'assists', 'label': 'Partner assists'},
         {'id': 'supers', 'label': 'Hyper combos'},
+        {'id': 'tags', 'label': 'Tags (LP+LK / HP+HK)', 'default_enabled': False},
     )
     search_buttons = ('LP','LK','HP','HK','A1','A2')
 
@@ -51,7 +53,7 @@ class MarvelVsCapcom2:
                 'state_extensions': self.state_extensions,
                 'status': 'Experimental escape checks',
                 'moves': [{'name': a.name, 'group': a.group, 'buttons': sorted({b for step in a.steps for b in step.buttons})} for a in self.actions([g['id'] for g in self.groups])],
-                'limits': 'Naomi mvsc2. A1/A2 call the selected partner assists; 236PP, 214PP and 236KK cover SonSon’s hypers. SonSon launcher and aerial continuations are prioritized when she is P1. Finalists face guard and jump attempts after the first hit. Hitstun is uncalibrated. Runs at normal speed.',
+                'limits': 'Naomi mvsc2. A1/A2 call partner assists. Enable Tags to explore LP+LK and HP+HK swaps; the second pair is labeled HP/HK here, even on layouts that call it MP/MK. Tag transitions are experimental. SonSon launcher/aerial priorities apply before a swap. Finalists face guard and jump attempts. Hitstun is uncalibrated. Runs at normal speed.',
                 'connection_steps': ['Prepare a session, then use Launch emulator to open its isolated Flycast copy.',
                                      'The copied save state loads automatically. Keep that window running with menus closed.',
                                      'Close the isolated Flycast window to return to your original session.'],
@@ -76,6 +78,9 @@ class MarvelVsCapcom2:
         if 'assists' in groups:
             actions += [Action('Assist 1', (Step(1, ('A1',)),), 'assists'),
                         Action('Assist 2', (Step(1, ('A2',)),), 'assists')]
+        if 'tags' in groups:
+            actions += [Action('Tag 1', (Step(1, ('LP','LK')),), 'tags'),
+                        Action('Tag 2', (Step(1, ('HP','HK')),), 'tags')]
         if 'supers' in groups:
             for name,motion,buttons_held in [
                 ('236PP', (('D',),('D','F'),('F',)), ('LP','HP')),
@@ -110,12 +115,14 @@ class MarvelVsCapcom2:
     def replay_compatible(self, replay):
         profile=replay.get('profile_sha256')
         if profile==self.profile_sha256: return True
+        if profile==self.assist_input_profile: return True
         if profile not in self.previous_input_profiles: return False
         return all(set(step['buttons']) <= {'U','D','L','R','F','B','LP','HP','LK','HK'}
                    for step in replay.get('steps',[]))
 
     def trial_tail(self, candidate, rules):
         names=candidate.get('action_names',[])
+        if any(name in ('Tag 1','Tag 2') for name in names): return max(240,rules['tail'])
         if any(name in ('236PP','214PP','236KK') for name in names): return max(240,rules['tail'])
         if any(set(step.buttons) & {'A1','A2'} for step in candidate['steps']): return max(180,rules['tail'])
         return rules['tail']
@@ -131,11 +138,12 @@ class MarvelVsCapcom2:
         candidate['trajectory']=trace[end_frame:end_frame+rules.get('max_delay',60)+12]
         candidate['launch_observed']=any(row['p2']['y']>80 for row in trace[end_frame:])
         candidate['airborne_observed']=any(row['p1']['y']>1 for row in trace[end_frame:])
+        candidate['tag_transition']=any(row['p1']['slot']!=trace[0]['p1']['slot'] for row in trace)
 
     def order_continuations(self,candidates,parent,rules):
         # Only SonSon gets character-specific priorities. Never treat a move name
         # as evidence that it launched or connected: use the observed trajectory.
-        if parent['state']['p1'].get('character')!=20:
+        if parent.get('tag_transition') or any(n in ('Tag 1','Tag 2') for n in parent.get('action_names',[])) or parent['state']['p1'].get('character')!=20:
             return candidates
         names=parent.get('action_names',[])
         if not names:
@@ -177,7 +185,8 @@ class MarvelVsCapcom2:
         # Keep a launcher and an airborne setup even if a grounded special did
         # more immediate damage. Remaining slots still rank by measured damage.
         for predicate in (lambda c:c.get('airborne_observed') and c.get('last') not in ('236PP','214PP','236KK'),
-                          lambda c:c.get('launch_observed') and not c.get('airborne_observed')):
+                          lambda c:c.get('launch_observed') and not c.get('airborne_observed'),
+                          lambda c:c.get('tag_transition')):
             options=[c for c in survivors if predicate(c) and all(c is not x for x in selected)]
             if options and len(selected)<width:
                 selected.append(max(options,key=lambda c:c['score']['damage']))
@@ -202,6 +211,7 @@ class MarvelVsCapcom2:
         self.validate_initial(trace[0])
         hits, healing, spent = [], 0, 0
         reasons = []
+        allow_tags='tags' in rules.get('groups',[])
         for previous, row in zip(trace, trace[1:]):
             delta = previous['p2']['health'] - row['p2']['health']
             if delta > 0: hits.append({'frame': row['frame'], 'damage': delta})
@@ -213,7 +223,13 @@ class MarvelVsCapcom2:
             if row.get('in_match') != row['p1']['active_count']: reasons.append('not_in_match')
             for side in ('p1','p2'):
                 p, original = row[side], trace[0][side]
-                if p['slot'] != original['slot'] or p['character'] != original['character'] or not (1 <= p['active_count'] <= (3 if side=='p1' else 1)):
+                changed=p['slot']!=original['slot'] or p['character']!=original['character']
+                roster=original.get('team_characters')
+                valid_tag=(side=='p1' and allow_tags and isinstance(roster,list) and len(roster)==3
+                           and p.get('team_characters')==roster and type(p['slot']) is int and 1<=p['slot']<=3
+                           and p['character']==roster[p['slot']-1]
+                           and p['health']==p['team_health'][p['slot']-1])
+                if (changed and not valid_tag) or not (1 <= p['active_count'] <= (3 if side=='p1' else 1)):
                     reasons.append('tag_or_assist')
                 if any(h <= 0 for h in p['team_health']): reasons.append('ko_or_life_transition')
                 if not 0 <= p['health'] <= 144: reasons.append('invalid_health')

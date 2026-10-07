@@ -31,7 +31,7 @@ BUSY={'starting','checking','model','searching','validating','replaying','stoppi
 
 def validate_rules(data,game):
     if not isinstance(data,dict): raise ValueError('Rules must be an object.')
-    rules={**DEFAULT_RULES,'groups':[g['id'] for g in game.groups],**data}
+    rules={**DEFAULT_RULES,'groups':[g['id'] for g in game.groups if g.get('default_enabled',True)],**data}
     bounds={'budget':(24,5000),'depth':(1,64),'beam':(1,32),'seed':(0,2147483647),
             'max_start_delay':(0,120),'max_delay':(0,120),'max_frames':(1,960),'tail':(10,600),'stock_cap':(0,99)}
     for key,(low,high) in bounds.items():
@@ -111,7 +111,7 @@ class Dashboard:
         default_state=Path(getattr(game,'default_snapshot','G:/Games/Fightcade/emulator/fbneo/savestates/vsavj slot 01.fs'))
         value={ 'instance_count':1, 'emulator':str(default_exe) if default_exe.exists() else '',
                  'snapshot':str(default_state) if (game.id=='vampire-savior' or hasattr(game,'default_snapshot')) and default_state.exists() else '',
-                 'rules':{**DEFAULT_RULES,'groups':[g['id'] for g in game.groups],
+                 'rules':{**DEFAULT_RULES,'groups':[g['id'] for g in game.groups if g.get('default_enabled',True)],
                           'true_combo':getattr(game,'definition',{}).get('combo_validated',getattr(game,'combo_validated',True))},**self.config.get(game.id,{})}
 
         if hasattr(game,'definition'):

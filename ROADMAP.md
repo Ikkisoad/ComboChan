@@ -22,9 +22,9 @@ Existing saved settings and replay evidence must remain compatible.
    the trial budget measuring enabled moves and prioritize observed contact,
    hitstun/link windows and cancel opportunities. Distinguish measured contact
    latency from true startup/recovery; unavailable signals must stay unknown.
-6. **Close emulators** — In progress. Add a dashboard action to close the emulator
+6. **Close emulators** — Implemented. Add a dashboard action to close the emulator
    processes launched by this dashboard, with predictable active-job handling.
-7. **MVC2 tags** — Planned. Add optional tag actions and account for point-character
+7. **MVC2 tags** — Implemented, experimental pending live calibration. Add optional tag actions and account for point-character
    changes when evaluating routes. Explain the adapter's button aliases and retain
    the current limitation that MVC2 hitstun/true-combo verification is uncalibrated.
 
@@ -49,7 +49,37 @@ can use lighter models; bridge/scoring changes need careful review.
   in the current scenario, not asserted to be intrinsic startup. Combo counters
   are not treated as hitstun duration. Missing recovery/frame advantage stays
   null; learned windows prioritize trials without excluding other timings.
+- Close emulators requests graceful shutdown of processes launched by the current
+  dashboard for the selected game, including older prepared sessions. Active jobs
+  must finish or stop after their batch. Failed close requests remain retryable.
+- MVC2 Tags is off by default. `Tag 1` uses `LP+LK`; `Tag 2` uses `HP+HK`
+  (the second attack pair referred to as `MP+MK` on some layouts). Enabled tags
+  permit P1 swaps within the original team roster; P2 swaps, KOs and invalid
+  telemetry are still rejected. After a swap, root-character timing observations
+  and SonSon-specific priorities no longer guide that branch.
 - Remaining calibration work: Flycast checkpoint callback timing, reliable P1
   actionable/recovery signals, MVC2 hitstun, context-specific timing after tags,
   and live comparison against full-root replays. Offline fixtures are not live
   game calibration evidence.
+
+## Validation (2026-10-07)
+
+- 166 offline tests passed, including the optional Lua checkpoint/point-tracking
+  tests with `COMBOCHAN_TEST_LUA51` set to a local Lua 5.1 library.
+- `tools/test_dashboard_roadmap.cjs` passed against an isolated temporary server:
+  special moves/starters, 64-action settings, optional tag defaults and persistence,
+  timing controls, close requests using a fake owned process, busy-state controls,
+  and mobile layout. It also runs the starter browser regression.
+- No live emulator was closed during testing. Live tag behavior and the remaining
+  calibration items above are not certified by these synthetic tests.
+
+## Validation (2026-10-07)
+
+- 166 offline tests passed, including the optional Lua checkpoint/point-tracking
+  tests with `COMBOCHAN_TEST_LUA51` set to a local Lua 5.1 library.
+- `tools/test_dashboard_roadmap.cjs` passed against an isolated temporary server:
+  special moves/starters, 64-action settings, optional tag defaults and persistence,
+  timing controls, close requests using a fake owned process, busy-state controls,
+  and mobile layout. It also runs the starter browser regression.
+- No live emulator was closed during testing. Live tag behavior and the remaining
+  calibration items above are not certified by these synthetic tests.

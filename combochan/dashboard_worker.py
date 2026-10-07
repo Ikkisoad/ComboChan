@@ -73,7 +73,7 @@ def continuation_candidates(parent,actions,rules,vsav_ordering=True):
                 duration=sum(s.frames for s in action.steps)
                 command_windows=[d-duration+1+shift for d in parent.get('contact_frames',[]) for shift in (0,-1,1,-2,2)]
                 action_delays=list(dict.fromkeys([d for d in command_windows if 0<=d<=rules.get('max_delay',60)]+delays))
-            if parent['steps'] and rules.get('auto_timing',True) and rules.get('_timing_observations'):
+            if parent['steps'] and not parent.get('tag_transition') and rules.get('auto_timing',True) and rules.get('_timing_observations'):
                 learned=preferred_delays(parent,action,rules['_timing_observations'].get(action.name),rules.get('max_delay',60))
                 action_delays=list(dict.fromkeys(learned+action_delays))
             delay=action_delays[round_index%len(action_delays)] if parent['steps'] else delays[(round_index+index)%len(delays)]
@@ -134,7 +134,7 @@ def select_frontier(survivors, width):
 
 
 def extension_window(trace, end_frame, score):
-    """Observed remaining opponent stun, never a claim about P1 recovery."""
+    """Remaining stun/continuity signal, never a claim about P1 recovery."""
     if not score.get('damage_events'): return 0
     contact=score['damage_events'][-1]['frame']
     # Null hitstun (MVC2) provides no usable window.

@@ -54,7 +54,9 @@ local function player(p)
         if flags[i]==1 then active=active+1;if active==1 then slot=i end end
     end
     if point_slots[p] and flags[point_slots[p]]==1 then slot=point_slots[p] end
-    if not point_slots[p] then point_slots[p]=slot end
+    -- Keep the point stable during assist overlap, then remember a completed
+    -- swap so a later assist from the original character cannot reclaim it.
+    point_slots[p]=slot
     local base=0x0c2d7088+(p-1)*0x5a4+(slot-1)*0xb48
     -- Unknown hitstun is null in JSON, never a fabricated zero.
     return {health=team[slot],team_health=team,team_active=flags,team_characters=characters,
